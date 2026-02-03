@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+timestamp(){ date +%Y%m%d_%H%M%S; }
+    set -euo pipefail
+
+    . /usr/local/lib/sg-runbook/lib/common.sh
+
+    require_root
+
+    RB_LOG_DIR="/var/log/sg-runbook"
+    ensure_log_dir "$RB_LOG_DIR"
+    LOG="$RB_LOG_DIR/remove_slurm_genai_demo_$(timestamp).log"
+    exec > >(tee -a "$LOG") 2>&1
+
+    demo_dir="/opt/sg-demos/genai-textgen"
+
+    usage() {
+      cat <<'USAGE'
+    Usage:
+      sg-remove-slurm-genai-demo [--demo-dir DIR]
+
+    Removes the Slurm job artifacts for the genai demo:
+      - deletes DIR/slurm/ (job script + outputs)
+
+    Options:
+      --demo-dir DIR   (default: /opt/sg-demos/genai-textgen)
+      -h, --help       show help
+USAGE
+    }
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --demo-dir) demo_dir="$2"; shift 2;;
+        -h|--help) usage; exit 0;;
+        *) die "unknown arg: $1 (try --help)";;
+      esac
+    done
+
+    target="${demo_dir}/slurm"
+    if [[ -d "$target" ]]; then
+      rm -rf "$target"
+      log "Removed: $target"
+    else
+      log "Not found (ok): $target"
+    fi
+
+    log "Done."

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMON=/usr/local/lib/sg-runbook/lib/common.sh
+if [[ -r "$COMMON" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  source "$COMMON"
+fi
+
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*" >&2; }
+die(){ echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-install-pytorch-apptainer [--tag TAG] [--image docker://... ] [--dir DIR] [--force]
+
+What it does:
+  - Pulls a PyTorch image from Docker Hub via Apptainer (no Docker daemon needed)
+  - Stores SIF under DIR (default: /opt/sg/containers/pytorch)
+  - Creates/updates DIR/current.sif symlink to the pulled SIF
+
+Options:
+  --tag TAG     Docker Hub tag for pytorch/pytorch
+                default: 2.10.0-cuda13.0-cudnn9-runtime
+  --image URI   Full Apptainer URI (e.g. docker://pytorch/pytorch:...)
+                If set, --tag is ignored.
+  --dir DIR     Install directory for SIFs (default: /opt/sg/containers/pytorch)
+  --force       Re-pull even if target SIF already exists
+  -h, --help    Show this help
+
+Examples:
+  sg-install-pytorch-apptainer
+  sg-install-pytorch-apptainer --tag 2.10.0-cuda13.0-cudnn9-runtime
+  sg-install-pytorch-apptainer --image docker://pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime
+  sg-install-pytorch-apptainer --dir /mnt/fast/containers/pytorch
+USAGE
+}
+
+# defaults
+TAG="2.10.0-cuda13.0-cudnn9-runtime"
+IMAGE=""
+INSTALL_DIR="/opt/sg/containers/pytorch"
+FORCE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag) TAG="${2:-}"; shift 2;;
+    --image) IMAGE="${2:-}"; shift 2;;
+    --dir) INSTALL_DIR="${2:-}"; shift 2;;
+    --force) FORCE=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1";;
+  esac
+done
+
+mkdir -p /var/log/sg-runbook
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOGF="/var/log/sg-runbook/install_pytorch_apptainer_${RUN_TS}.log"
+exec > >(tee -a "$LOGF") 2>&1
+
+log "==== sg-install-pytorch-apptainer start ===="
+log "log: $LOGF"
+log "install_dir: $INSTALL_DIR"
+
+if ! command -v apptainer >/dev/null 2>&1; then
+  die "apptainer not found. Install it first (sg-install-apptainer)."
+fi
+
+if [[ -z "$IMAGE" ]]; then
+  IMAGE="docker://pytorch/pytorch:${TAG}"
+fi
+log "image: $IMAGE"
+
+# SIF filename derived from image ref (safe chars only)
+# e.g. docker://pytorch/pytorch:2.10.0-cuda13.0... -> pytorch_pytorch__2.10.0-cuda13.0....sif
+ref="${IMAGE#docker://}"
+safe_ref="$(LC_ALL=C echo "$ref" | tr '/:' '__' | tr -c 'A-Za-z0-9._+-' '_' )"
+SIF_BASENAME="pytorch_${safe_ref}.sif"
+
+mkdir -p "$INSTALL_DIR"
+SIF_PATH="${INSTALL_DIR}/${SIF_BASENAME}"
+CURRENT_LINK="${INSTALL_DIR}/current.sif"
+META_PATH="${INSTALL_DIR}/current.meta"
+
+# Optional GPU presence note (pull 자체には不要なので warn のみ)
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  warn "nvidia-smi not found. This node may be CPU-only. (Install will continue; GPU verify will fail.)"
+else
+  log "GPU detected:"
+  nvidia-smi -L || warn "nvidia-smi -L failed (driver issue?)"
+fi
+
+if [[ -e "$SIF_PATH" && $FORCE -eq 0 ]]; then
+  log "SIF already exists: $SIF_PATH (skip). Use --force to re-pull."
+else
+  tmp="${SIF_PATH}.tmp.$$"
+  rm -f "$tmp"
+  log "Pulling -> $tmp"
+  # Apptainer: docker/OCI -> SIF (Docker daemon not required)
+  apptainer pull "$tmp" "$IMAGE"
+  mv -f "$tmp" "$SIF_PATH"
+  log "Saved: $SIF_PATH"
+fi
+
+# Update current symlink (relative target so moving the dir is easier)
+ln -sfn "$(basename "$SIF_PATH")" "$CURRENT_LINK"
+{
+  echo "IMAGE=$IMAGE"
+  echo "SIF=$(basename "$SIF_PATH")"
+  echo "DATE=$(date -Is)"
+} >"$META_PATH"
+
+log "current: $CURRENT_LINK -> $(readlink -f "$CURRENT_LINK")"
+log "meta: $META_PATH"
+log "==== sg-install-pytorch-apptainer done ===="

@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sudo sg-install-cuda-toolkit [--branch 13-1] [--no-pin] [--no-profile]
+
+Notes:
+  - Ubuntu 24.04 前提 (ubuntu2404 repo)
+  - 既存の NVIDIA Driver は触らない方針 (cuda-toolkit-* を入れる。cuda メタパッケージは入れない)
+USAGE
+}
+
+BRANCH="13-1"     # CUDA Toolkit branch (e.g. 13-1)
+PIN=1             # install repo pin by default
+PROFILE=1         # drop /etc/profile.d/cuda.sh by default
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --branch) BRANCH="${2:-}"; shift 2;;
+    --no-pin) PIN=0; shift;;
+    --no-profile) PROFILE=0; shift;;
+    -h|--help) usage; exit 0;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2;;
+  esac
+done
+
+if [ "${EUID:-0}" -ne 0 ]; then
+  echo "ERROR: run as root (use sudo)" >&2
+  exit 1
+fi
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "ERROR: nvidia-smi not found. This runbook is for GPU servers (install driver first)." >&2
+  exit 1
+fi
+
+. /etc/os-release || true
+if [ "${VERSION_ID:-}" != "24.04" ]; then
+  echo "ERROR: This runbook assumes Ubuntu 24.04 (VERSION_ID=24.04). Current: ${VERSION_ID:-unknown}" >&2
+  exit 1
+fi
+
+LOG="/var/log/sg-runbook/install_cuda_toolkit_${BRANCH}_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[INFO] ==== sg-install-cuda-toolkit start ===="
+echo "[INFO] branch: ${BRANCH}"
+echo "[INFO] log: ${LOG}"
+
+echo "[INFO] GPU detected:"
+nvidia-smi -L || true
+
+echo "[INFO] apt deps..."
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg build-essential
+
+# CUDA repo: install cuda-keyring (network repo)
+if dpkg -s cuda-keyring >/dev/null 2>&1; then
+  echo "[INFO] cuda-keyring already installed (skip)"
+else
+  echo "[INFO] installing cuda-keyring..."
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "${tmp}/cuda-keyring.deb" \
+    "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+  dpkg -i "${tmp}/cuda-keyring.deb"
+  rm -rf "${tmp}"
+fi
+
+if [ "$PIN" -eq 1 ]; then
+  echo "[INFO] installing repo pin (priority 600)..."
+  curl -fsSL -o /etc/apt/preferences.d/cuda-repository-pin-600 \
+    "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-ubuntu2404.pin"
+else
+  echo "[INFO] --no-pin: skip repo pin"
+fi
+
+echo "[INFO] apt update..."
+apt-get update
+
+PKG="cuda-toolkit-${BRANCH}"
+echo "[INFO] installing: ${PKG}"
+apt-get install -y --no-install-recommends "${PKG}"
+
+# Ensure /usr/local/cuda symlink exists
+if [ -L /usr/local/cuda ] || [ -d /usr/local/cuda ]; then
+  echo "[INFO] /usr/local/cuda already exists (ok)"
+else
+  # Find newest cuda dir and link it
+  cand="$(ls -d /usr/local/cuda-* 2>/dev/null | sort -V | tail -n1 || true)"
+  if [ -n "${cand}" ] && [ -d "${cand}" ]; then
+    ln -sfn "${cand}" /usr/local/cuda
+    echo "[INFO] linked /usr/local/cuda -> ${cand}"
+  fi
+fi
+
+# ldconfig path
+if [ -d /usr/local/cuda/lib64 ]; then
+  echo "/usr/local/cuda/lib64" > /etc/ld.so.conf.d/cuda.conf
+  ldconfig
+fi
+
+# Optional profile.d
+if [ "$PROFILE" -eq 1 ]; then
+  cat > /etc/profile.d/cuda.sh <<'CUDA_PROFILE_EOF'
+# /etc/profile.d/cuda.sh (installed by sg-install-cuda-toolkit)
+export CUDA_HOME=/usr/local/cuda
+if [ -d "${CUDA_HOME}/bin" ]; then
+  case ":$PATH:" in
+    *":${CUDA_HOME}/bin:"*) : ;;
+    *) export PATH="${CUDA_HOME}/bin:${PATH}" ;;
+  esac
+fi
+CUDA_PROFILE_EOF
+  chmod 0644 /etc/profile.d/cuda.sh
+  echo "[INFO] installed /etc/profile.d/cuda.sh"
+else
+  echo "[INFO] --no-profile: skip /etc/profile.d/cuda.sh"
+fi
+
+echo "[INFO] nvcc path check:"
+if [ -x /usr/local/cuda/bin/nvcc ]; then
+  /usr/local/cuda/bin/nvcc --version || true
+else
+  echo "[WARN] /usr/local/cuda/bin/nvcc not found (PATH may still find nvcc)."
+  command -v nvcc || true
+fi
+
+echo "[INFO] ==== sg-install-cuda-toolkit done ===="
+echo "[INFO] log: ${LOG}"

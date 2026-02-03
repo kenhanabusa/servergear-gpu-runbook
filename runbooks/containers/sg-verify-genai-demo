@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+timestamp(){ date +%Y%m%d_%H%M%S; }
+    set -euo pipefail
+
+    . /usr/local/lib/sg-runbook/lib/common.sh
+
+    require_root
+
+    RB_LOG_DIR="/var/log/sg-runbook"
+    ensure_log_dir "$RB_LOG_DIR"
+    LOG="$RB_LOG_DIR/verify_genai_demo_$(timestamp).log"
+    exec > >(tee -a "$LOG") 2>&1
+
+    demo_dir="/opt/sg-demos/genai-textgen"
+    sif=""
+    model="gpt2"
+    prompt="Once upon a time,"
+    max_new_tokens="80"
+
+    usage() {
+      cat <<'USAGE'
+    Usage:
+      sg-verify-genai-demo [--demo-dir DIR] [--sif PATH] [--model ID] [--prompt TEXT] [--max-new-tokens N]
+
+    Runs the demo inside the Apptainer SIF and checks it completes.
+
+    Options:
+      --demo-dir DIR       (default: /opt/sg-demos/genai-textgen)
+      --sif PATH           (default: /opt/sg-images/nvcr.io_nvidia_pytorch_latest.sif)
+      --model ID           (default: gpt2)
+      --prompt TEXT        (default: "Once upon a time,")
+      --max-new-tokens N   (default: 80)
+      -h, --help           show help
+USAGE
+    }
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --demo-dir) demo_dir="$2"; shift 2;;
+        --sif) sif="$2"; shift 2;;
+        --model) model="$2"; shift 2;;
+        --prompt) prompt="$2"; shift 2;;
+        --max-new-tokens) max_new_tokens="$2"; shift 2;;
+        -h|--help) usage; exit 0;;
+        *) die "unknown arg: $1 (try --help)";;
+      esac
+    done
+
+    have_cmd apptainer || die "apptainer not found."
+
+    if [[ -z "$sif" ]]; then
+      sif="/opt/sg-images/nvcr.io_nvidia_pytorch_latest.sif"
+    fi
+    [[ -f "$sif" ]] || die "SIF not found: $sif (run sg-install-ngc-container)"
+
+    [[ -f "${demo_dir}/demo_textgen.py" ]] || die "demo not installed: ${demo_dir}/demo_textgen.py (run sg-install-genai-demo)"
+    pydeps="${demo_dir}/pydeps"
+    hf_home="${demo_dir}/hf_home"
+
+    log "Running demo inside container..."
+    log "SIF: $sif"
+    log "DEMO_DIR: $demo_dir"
+    log "MODEL: $model"
+
+    run apptainer exec --nv \
+      --bind "$demo_dir:$demo_dir" \
+      --env PYTHONPATH="$pydeps" \
+      --env HF_HOME="$hf_home" \
+      --env TRANSFORMERS_CACHE="$hf_home/transformers" \
+      --env HF_HUB_CACHE="$hf_home/hub" \
+      --env SG_DEMO_MODEL="$model" \
+      --env SG_DEMO_PROMPT="$prompt" \
+      --env SG_DEMO_MAX_NEW_TOKENS="$max_new_tokens" \
+      "$sif" \
+      python3 "${demo_dir}/demo_textgen.py"
+
+    log "OK"

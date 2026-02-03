@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/var/log/sg-runbook"
+LOG="${LOG_DIR}/remove_nvidia_580_open_${TS}.log"
+BK_DIR="/var/backups/sg-runbook/nvidia_580_open_${TS}"
+mkdir -p "$LOG_DIR" "/var/backups/sg-runbook"
+exec > >(tee -a "$LOG") 2>&1
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*"; }
+
+PURGE=0
+
+usage(){
+  cat <<'USAGE'
+Usage: sg-remove-nvidia-580-open [--purge]
+  --purge  apt purge (remove config files too)
+Note: removing the NVIDIA driver usually requires reboot to fully take effect.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --purge) PURGE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+  shift
+done
+
+[[ $EUID -eq 0 ]] || die "run as root"
+
+log "==== sg-remove-nvidia-580-open start ===="
+log "log: $LOG"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  warn "nvidia-smi is currently available; driver is in use."
+  nvidia-smi || true
+  nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null || true
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl stop nvidia-persistenced 2>/dev/null || true
+fi
+
+mkdir -p "$BK_DIR"
+for p in /etc/modprobe.d /etc/modules-load.d; do
+  [[ -d "$p" ]] && cp -a "$p" "$BK_DIR/" || true
+done
+
+export DEBIAN_FRONTEND=noninteractive
+
+mapfile -t PKGS < <(dpkg-query -W -f='${Package}\n' \
+  | grep -E '^(nvidia|libnvidia|linux-modules-nvidia|xserver-xorg-video-nvidia)' \
+  | grep -E '580' || true)
+
+if [[ ${#PKGS[@]} -eq 0 ]]; then
+  warn "no 580-related NVIDIA driver packages found (skip)"
+else
+  log "packages to remove: ${#PKGS[@]}"
+  if [[ $PURGE -eq 1 ]]; then
+    log "apt purge..."
+    apt-get purge -y "${PKGS[@]}" || true
+  else
+    log "apt remove..."
+    apt-get remove -y "${PKGS[@]}" || true
+  fi
+fi
+
+log "apt autoremove..."
+apt-get autoremove -y --purge || true
+
+if command -v update-initramfs >/dev/null 2>&1; then
+  log "update-initramfs -u (best-effort)"
+  update-initramfs -u || true
+fi
+
+warn "Driver removal may require reboot."
+log "==== sg-remove-nvidia-580-open done ===="
+log "log: $LOG"

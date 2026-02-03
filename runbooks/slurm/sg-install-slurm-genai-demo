@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+timestamp(){ date +%Y%m%d_%H%M%S; }
+    set -euo pipefail
+
+    . /usr/local/lib/sg-runbook/lib/common.sh
+
+    require_root
+
+    RB_LOG_DIR="/var/log/sg-runbook"
+    ensure_log_dir "$RB_LOG_DIR"
+    LOG="$RB_LOG_DIR/install_slurm_genai_demo_$(timestamp).log"
+    exec > >(tee -a "$LOG") 2>&1
+
+    demo_dir="/opt/sg-demos/genai-textgen"
+    sif=""
+
+    usage() {
+      cat <<'USAGE'
+    Usage:
+      sg-install-slurm-genai-demo [--demo-dir DIR] [--sif PATH]
+
+    What this does:
+      - Writes an sbatch job script that runs the genai demo via Apptainer.
+      - Does NOT submit the job. (Use sg-verify-slurm-genai-demo to submit+check.)
+
+    Prereqs:
+      - Slurm installed (sbatch available) for verify/submit
+      - Apptainer installed
+      - Demo installed (sg-install-genai-demo)
+      - SIF present (sg-install-ngc-container)
+
+    Options:
+      --demo-dir DIR   (default: /opt/sg-demos/genai-textgen)
+      --sif PATH       (default: /opt/sg-images/nvcr.io_nvidia_pytorch_latest.sif)
+      -h, --help       show help
+USAGE
+    }
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --demo-dir) demo_dir="$2"; shift 2;;
+        --sif) sif="$2"; shift 2;;
+        -h|--help) usage; exit 0;;
+        *) die "unknown arg: $1 (try --help)";;
+      esac
+    done
+
+    if [[ -z "$sif" ]]; then
+      sif="/opt/sg-images/nvcr.io_nvidia_pytorch_latest.sif"
+    fi
+
+    have_cmd apptainer || die "apptainer not found."
+    [[ -f "$sif" ]] || die "SIF not found: $sif"
+    [[ -f "${demo_dir}/demo_textgen.py" ]] || die "demo not installed: ${demo_dir}/demo_textgen.py"
+
+    out_dir="${demo_dir}/slurm/out"
+    job="${demo_dir}/slurm/textgen.sbatch"
+    mkdir -p "$out_dir" "$(dirname "$job")"
+
+
+# SG-RUNBOOK:FIX_OUT_PERMS (make output dirs writable for submitting user)
+u="${SUDO_USER:-}"
+if [[ -n "$u" && "$u" != "root" ]]; then
+  chown -R "$u":"$u" "$(dirname "$out_dir")" || true
+  chmod -R u+rwX,go+rX "$(dirname "$out_dir")" || true
+  chmod 0775 "$out_dir" || true
+fi
+    cat > "$job" <<EOF
+    #!/usr/bin/env bash
+    #SBATCH --job-name=sg-genai-textgen
+    #SBATCH --output=${out_dir}/%x-%j.out
+    #SBATCH --error=${out_dir}/%x-%j.err
+    #SBATCH --nodes=1
+    #SBATCH --ntasks=1
+    #SBATCH --cpus-per-task=4
+    #SBATCH --time=00:30:00
+
+    # If your Slurm is configured with GPU GRES, you can enable ONE of these:
+    ##SBATCH --gpus=1
+    #SBATCH --gres=gpu:1
+
+    set -euo pipefail
+
+    DEMO_DIR="${demo_dir}"
+    SIF="${sif}"
+    PYDEPS="\${DEMO_DIR}/pydeps"
+    HF_HOME="\${DEMO_DIR}/hf_home"
+
+    mkdir -p "${out_dir}"
+
+    # For clusters without GPU scheduling, force using GPU 0 by default.
+    export CUDA_VISIBLE_DEVICES="\${CUDA_VISIBLE_DEVICES:-0}"
+
+    echo "== job info =="
+    date
+    hostname
+    echo "CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES}"
+    echo "SIF=\${SIF}"
+    echo
+
+    apptainer exec --nv \\
+      --bind "\${DEMO_DIR}:\${DEMO_DIR}" \\
+      --env PYTHONPATH="\${PYDEPS}" \\
+      --env HF_HOME="\${HF_HOME}" \\
+      --env TRANSFORMERS_CACHE="\${HF_HOME}/transformers" \\
+      --env HF_HUB_CACHE="\${HF_HOME}/hub" \\
+      "\${SIF}" \\
+      python3 "\${DEMO_DIR}/demo_textgen.py"
+
+    echo "== done =="
+    date
+EOF
+
+    chmod 0755 "$job"
+    
+
+# SG-RUNBOOK:NORMALIZE_SBATCH (fix shebang-at-column-1 + dedent)
+JOB_PATH="$job" python3 - <<'PYFIX'
+import os, re, textwrap, pathlib
+p = pathlib.Path(os.environ["JOB_PATH"])
+t = p.read_text(encoding="utf-8", errors="replace").replace("\r\n","\n").replace("\r","\n")
+t = textwrap.dedent(t)
+lines = t.splitlines()
+while lines and (lines[0].strip()=="" or lines[0].strip()=="\\"):
+    lines.pop(0)
+if lines and re.match(r"^\s*#!", lines[0]):
+    lines[0] = lines[0].lstrip()
+else:
+    lines.insert(0, "#!/usr/bin/env bash")
+p.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+print("[INFO] normalized:", p)
+PYFIX
+log "Wrote sbatch script: $job"
+    if ! have_cmd sbatch; then
+      warn "sbatch not found yet (Slurm not installed?). Install Slurm before running sg-verify-slurm-genai-demo."
+    fi
+    log "Done."

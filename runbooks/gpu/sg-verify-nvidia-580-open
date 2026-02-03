@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/var/log/sg-runbook"
+LOG="${LOG_DIR}/verify_nvidia_580_open_${TS}.log"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG") 2>&1
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*"; }
+
+[[ $EUID -eq 0 ]] || die "run as root"
+
+log "==== sg-verify-nvidia-580-open start ===="
+log "log: $LOG"
+
+command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi not found"
+
+nvidia-smi >/dev/null 2>&1 || die "nvidia-smi failed (driver not ready; reboot?)"
+nvidia-smi -L
+
+DRV="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ' || true)"
+[[ -n "$DRV" ]] || die "failed to read driver_version from nvidia-smi"
+log "driver_version: $DRV"
+if [[ "$DRV" != 580* ]]; then
+  die "expected 580.x but got: $DRV"
+fi
+
+log "dkms status (if any):"
+dkms status | grep -i nvidia || true
+
+log "packages:"
+dpkg -l | awk '$1=="ii"{print $2, $3}' | egrep 'nvidia-driver-580-open|nvidia-utils-580|nvidia-dkms-580|libnvidia.*580|linux-modules-nvidia.*580' || true
+
+log "==== sg-verify-nvidia-580-open done ===="
+log "log: $LOG"

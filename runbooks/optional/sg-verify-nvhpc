@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-verify-nvhpc [--version 26.1]
+
+Options:
+  --version <X.Y>   Pin NVHPC_VERSION for this verification run.
+USAGE
+}
+
+PIN_VERSION=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      PIN_VERSION="${2:-}"; shift 2;;
+    -h|--help)
+      usage; exit 0;;
+    *)
+      echo "[ERROR] Unknown arg: $1" >&2
+      usage >&2
+      exit 2;;
+  esac
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "[ERROR] run as root (sudo)" >&2
+  exit 1
+fi
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="/var/log/sg-runbook/verify_nvhpc_${TS}.log"
+mkdir -p /var/log/sg-runbook
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[INFO] ==== sg-verify-nvhpc start ===="
+echo "[INFO] log: ${LOG}"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[INFO] GPU detected:"
+  nvidia-smi -L || true
+else
+  echo "[ERROR] nvidia-smi not found. This verify requires an NVIDIA GPU node." >&2
+  exit 1
+fi
+
+if [[ -n "${PIN_VERSION}" ]]; then
+  export NVHPC_VERSION="${PIN_VERSION}"
+  echo "[INFO] pin NVHPC_VERSION=${NVHPC_VERSION}"
+fi
+
+if [[ -f /etc/profile.d/sg-nvhpc.sh ]]; then
+  # shellcheck disable=SC1091
+  source /etc/profile.d/sg-nvhpc.sh
+else
+  echo "[ERROR] /etc/profile.d/sg-nvhpc.sh not found. Run sg-install-nvhpc first." >&2
+  exit 1
+fi
+
+echo "[INFO] PATH nvc: $(command -v nvc || true)"
+echo "[INFO] PATH nvc++: $(command -v nvc++ || true)"
+echo "[INFO] PATH nvfortran: $(command -v nvfortran || true)"
+
+command -v nvc >/dev/null 2>&1 || { echo "[ERROR] nvc not found in PATH." >&2; exit 1; }
+
+echo "[INFO] nvc -V:"
+nvc -V || true
+if command -v nvc++ >/dev/null 2>&1; then
+  echo "[INFO] nvc++ -V:"
+  nvc++ -V || true
+fi
+if command -v nvfortran >/dev/null 2>&1; then
+  echo "[INFO] nvfortran -V:"
+  nvfortran -V || true
+fi
+
+if command -v nvaccelinfo >/dev/null 2>&1; then
+  echo "[INFO] nvaccelinfo:"
+  nvaccelinfo || true
+else
+  echo "[WARN] nvaccelinfo not found (continuing)."
+fi
+
+# Determine GPU compute capability for -gpu=ccXY (best-effort)
+cap_raw=""
+cap_raw="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '. ' || true)"
+gpu_cc=""
+if [[ "${cap_raw}" =~ ^[0-9]+$ ]]; then
+  gpu_cc="cc${cap_raw}"
+fi
+
+# Determine bundled CUDA version inside NVHPC (best-effort)
+cuda_opt=""
+if [[ -n "${NVHPC_ROOT:-}" ]] && [[ -d "${NVHPC_ROOT}/cuda" ]]; then
+  cuda_dir="$(ls -1 "${NVHPC_ROOT}/cuda" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)"
+  if [[ -n "${cuda_dir:-}" ]]; then
+    cuda_opt="cuda${cuda_dir}"
+  fi
+fi
+
+gpu_opt=""
+if [[ -n "${gpu_cc}" && -n "${cuda_opt}" ]]; then
+  gpu_opt="-gpu=${gpu_cc},${cuda_opt}"
+elif [[ -n "${gpu_cc}" ]]; then
+  gpu_opt="-gpu=${gpu_cc}"
+elif [[ -n "${cuda_opt}" ]]; then
+  gpu_opt="-gpu=${cuda_opt}"
+fi
+
+echo "[INFO] compile options: ${gpu_opt:-<default>}"
+
+tmpdir="$(mktemp -d)"
+cleanup() { rm -rf "${tmpdir}"; }
+trap cleanup EXIT
+
+cat > "${tmpdir}/openacc_vecadd.c" <<'SRC'
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <openacc.h>
+
+int main(void) {
+  int ndev = acc_get_num_devices(acc_device_nvidia);
+  printf("OpenACC NVIDIA devices: %d\n", ndev);
+  if (ndev < 1) {
+    fprintf(stderr, "ERROR: no NVIDIA OpenACC devices detected.\n");
+    return 2;
+  }
+
+  acc_set_device_num(0, acc_device_nvidia);
+  acc_init(acc_device_nvidia);
+
+  const int N = 1<<20;
+  float *a = (float*)malloc(sizeof(float) * (size_t)N);
+  float *b = (float*)malloc(sizeof(float) * (size_t)N);
+  float *c = (float*)malloc(sizeof(float) * (size_t)N);
+  if (!a || !b || !c) {
+    fprintf(stderr, "ERROR: malloc failed\n");
+    return 3;
+  }
+
+  for (int i = 0; i < N; i++) {
+    a[i] = 1.0f;
+    b[i] = 2.0f;
+    c[i] = 0.0f;
+  }
+
+  #pragma acc data copyin(a[0:N], b[0:N]) copyout(c[0:N])
+  {
+    #pragma acc parallel loop
+    for (int i = 0; i < N; i++) {
+      c[i] = a[i] + b[i];
+    }
+  }
+
+  float max_err = 0.0f;
+  for (int i = 0; i < N; i++) {
+    float e = fabsf(c[i] - 3.0f);
+    if (e > max_err) max_err = e;
+  }
+
+  printf("max_err=%g\n", max_err);
+  if (max_err > 1e-5f) {
+    fprintf(stderr, "ERROR: validation failed\n");
+    return 4;
+  }
+
+  printf("OpenACC kernel launch OK\n");
+  free(a); free(b); free(c);
+  return 0;
+}
+SRC
+
+opts=(-O2 -acc -Minfo=accel)
+if [[ -n "${gpu_opt}" ]]; then
+  opts+=("${gpu_opt}")
+fi
+
+echo "[INFO] compiling..."
+nvc "${opts[@]}" "${tmpdir}/openacc_vecadd.c" -o "${tmpdir}/openacc_vecadd"
+
+echo "[INFO] running..."
+# runtime trace (optional): notify transfers/kernels
+NVCOMPILER_ACC_NOTIFY=3 NVCOMPILER_ACC_TIME=1 "${tmpdir}/openacc_vecadd"
+
+echo "[INFO] ==== sg-verify-nvhpc done ===="
+echo "[INFO] log: ${LOG}"

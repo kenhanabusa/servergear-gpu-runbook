@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+ensure_log_dir
+
+OUT="$RB_LOG_DIR/verify_docker_gpu_$(_rb_now).log"
+exec > >(tee -a "$OUT") 2>&1
+
+log "==== sg-verify-docker (GPU) start ===="
+
+# Host GPU check (required)
+command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi not found (GPU server expected)"
+nvidia-smi -L
+echo
+
+# Docker daemon
+systemctl --no-pager --full status docker | sed -n '1,60p' || true
+echo
+
+docker version
+echo
+docker info | sed -n '1,140p'
+echo
+
+# Ensure NVIDIA runtime is registered in Docker
+if ! docker info 2>/dev/null | grep -qiE 'Runtimes:.*nvidia'; then
+  echo "ERROR: NVIDIA runtime not detected in docker info."
+  echo "Hint: run:"
+  echo "  sudo nvidia-ctk runtime configure --runtime=docker"
+  echo "  sudo systemctl restart docker"
+  exit 1
+fi
+
+echo "## GPU smoke test (Docker --gpus all)"
+IMG="nvidia/cuda:12.4.1-base-ubuntu22.04"
+echo "Image: $IMG"
+docker run --rm --gpus all "$IMG" nvidia-smi
+echo
+
+# Optional (still useful): basic container run
+echo "## hello-world (optional sanity)"
+docker run --rm hello-world
+echo
+
+log "==== sg-verify-docker (GPU) done ===="
+log "Log: $OUT"

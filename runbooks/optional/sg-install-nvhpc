@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-install-nvhpc [--version 26.1] [--cuda-multi]
+
+Options:
+  --version <X.Y>   NVHPC version (default: 26.1). Example: 26.1
+  --cuda-multi      Install "cuda-multi" package variant (e.g., nvhpc-26-1-cuda-multi)
+                    (If omitted, installs CUDA 13.1 bundled variant: nvhpc-26-1)
+USAGE
+}
+
+VERSION="26.1"
+CUDA_MULTI=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      VERSION="${2:-}"; shift 2;;
+    --cuda-multi)
+      CUDA_MULTI=1; shift;;
+    -h|--help)
+      usage; exit 0;;
+    *)
+      echo "[ERROR] Unknown arg: $1" >&2
+      usage >&2
+      exit 2;;
+  esac
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "[ERROR] run as root (sudo)" >&2
+  exit 1
+fi
+
+TS="$(date +%Y%m%d_%H%M%S)"
+VER_TAG="${VERSION//./-}"
+LOG="/var/log/sg-runbook/install_nvhpc_${VER_TAG}_${TS}.log"
+mkdir -p /var/log/sg-runbook
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[INFO] ==== sg-install-nvhpc start ===="
+echo "[INFO] version: ${VERSION}"
+echo "[INFO] cuda_multi: ${CUDA_MULTI}"
+echo "[INFO] log: ${LOG}"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[INFO] GPU detected:"
+  nvidia-smi -L || true
+else
+  echo "[WARN] nvidia-smi not found (compile-only node?). Install continues, but verify will fail without GPU."
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+echo "[INFO] apt deps..."
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg
+
+KEYRING="/usr/share/keyrings/nvidia-hpcsdk-archive-keyring.gpg"
+LIST="/etc/apt/sources.list.d/nvhpc.list"
+
+echo "[INFO] configuring NVIDIA HPC SDK apt repository..."
+tmp_key="$(mktemp)"
+curl -fsSL "https://developer.download.nvidia.com/hpc-sdk/ubuntu/DEB-GPG-KEY-NVIDIA-HPC-SDK" \
+  | gpg --dearmor -o "${tmp_key}"
+install -m 0644 "${tmp_key}" "${KEYRING}"
+rm -f "${tmp_key}"
+
+echo "deb [signed-by=${KEYRING}] https://developer.download.nvidia.com/hpc-sdk/ubuntu/amd64 /" > "${LIST}"
+
+echo "[INFO] apt update..."
+apt-get update
+
+PKG="nvhpc-${VER_TAG}"
+if [[ "${CUDA_MULTI}" -eq 1 ]]; then
+  PKG="${PKG}-cuda-multi"
+fi
+
+echo "[INFO] installing package: ${PKG}"
+apt-get install -y "${PKG}"
+
+PROFILE="/etc/profile.d/sg-nvhpc.sh"
+echo "[INFO] installing profile: ${PROFILE}"
+
+cat > "${PROFILE}" <<'EOSH'
+# NVIDIA HPC SDK (NVHPC) - sg-runbook environment
+# - login shell: auto
+# - current shell: source /etc/profile.d/sg-nvhpc.sh
+#
+# If you have multiple NVHPC versions installed:
+#   export NVHPC_VERSION=26.1
+# before sourcing, to pin a version.
+
+NVHPC=/opt/nvidia/hpc_sdk
+export NVHPC
+
+NVARCH="$(uname -s)_$(uname -m)"
+export NVARCH
+
+# Pick newest version if NVHPC_VERSION not set
+if [ -z "${NVHPC_VERSION:-}" ] && [ -d "$NVHPC/$NVARCH" ]; then
+  _nvhpc_latest="$(ls -1 "$NVHPC/$NVARCH" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+  if [ -n "${_nvhpc_latest:-}" ]; then
+    NVHPC_VERSION="$_nvhpc_latest"
+    export NVHPC_VERSION
+  fi
+fi
+
+if [ -n "${NVHPC_VERSION:-}" ] && [ -d "$NVHPC/$NVARCH/$NVHPC_VERSION" ]; then
+  NVHPC_ROOT="$NVHPC/$NVARCH/$NVHPC_VERSION"
+  export NVHPC_ROOT
+
+  _prepend_path() {
+    case ":$PATH:" in
+      *":$1:"*) :;;
+      *) PATH="$1:$PATH";;
+    esac
+  }
+
+  _append_manpath() {
+    if [ -z "${MANPATH:-}" ]; then
+      MANPATH="$1"
+    else
+      case ":$MANPATH:" in
+        *":$1:"*) :;;
+        *) MANPATH="$MANPATH:$1";;
+      esac
+    fi
+  }
+
+  _prepend_ld() {
+    if [ -z "${LD_LIBRARY_PATH:-}" ]; then
+      LD_LIBRARY_PATH="$1"
+    else
+      case ":$LD_LIBRARY_PATH:" in
+        *":$1:"*) :;;
+        *) LD_LIBRARY_PATH="$1:$LD_LIBRARY_PATH";;
+      esac
+    fi
+  }
+
+  # Compilers
+  if [ -d "$NVHPC_ROOT/compilers" ]; then
+    _prepend_path "$NVHPC_ROOT/compilers/bin"
+    [ -d "$NVHPC_ROOT/compilers/man" ] && _append_manpath "$NVHPC_ROOT/compilers/man"
+    [ -d "$NVHPC_ROOT/compilers/lib" ] && _prepend_ld "$NVHPC_ROOT/compilers/lib"
+    [ -d "$NVHPC_ROOT/compilers/lib64" ] && _prepend_ld "$NVHPC_ROOT/compilers/lib64"
+  fi
+
+  # MPI (OpenMPI)
+  if [ -d "$NVHPC_ROOT/comm_libs/mpi" ]; then
+    _prepend_path "$NVHPC_ROOT/comm_libs/mpi/bin"
+    [ -d "$NVHPC_ROOT/comm_libs/mpi/man" ] && _append_manpath "$NVHPC_ROOT/comm_libs/mpi/man"
+    [ -d "$NVHPC_ROOT/comm_libs/mpi/lib" ] && _prepend_ld "$NVHPC_ROOT/comm_libs/mpi/lib"
+    [ -d "$NVHPC_ROOT/comm_libs/mpi/lib64" ] && _prepend_ld "$NVHPC_ROOT/comm_libs/mpi/lib64"
+  fi
+
+  export PATH MANPATH LD_LIBRARY_PATH
+fi
+EOSH
+
+chmod 0644 "${PROFILE}"
+
+echo "[INFO] profile installed: ${PROFILE}"
+echo "[INFO] quick check (non-login shell):"
+bash -lc 'source /etc/profile.d/sg-nvhpc.sh && command -v nvc && nvc -V | head -n 2'
+
+echo "[INFO] ==== sg-install-nvhpc done ===="
+echo "[INFO] log: ${LOG}"

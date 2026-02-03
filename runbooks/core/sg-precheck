@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+ensure_log_dir
+
+OUT="$RB_LOG_DIR/precheck_$(_rb_now).log"
+exec > >(tee -a "$OUT") 2>&1
+
+log "==== sg-precheck start ===="
+date -Is
+echo
+
+echo "## OS / Kernel"
+( command -v lsb_release >/dev/null 2>&1 && lsb_release -a ) || true
+uname -a
+echo
+
+echo "## Host"
+hostnamectl || true
+echo
+
+echo "## Mount / FS"
+findmnt / || true
+findmnt -R / | sed -n '1,200p' || true
+echo
+
+echo "## Disks"
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL | sed -n '1,200p' || true
+echo
+
+echo "## df"
+df -hT | sed -n '1,200p' || true
+echo
+
+echo "## Btrfs"
+if command -v btrfs >/dev/null 2>&1; then
+  btrfs filesystem show || true
+  btrfs subvolume get-default / || true
+  btrfs subvolume list -p / | sed -n '1,200p' || true
+fi
+echo
+
+echo "## Timeshift"
+if command -v timeshift >/dev/null 2>&1; then
+  timeshift --list || true
+else
+  echo "timeshift: NOT INSTALLED"
+fi
+echo
+
+echo "## NVIDIA"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi || true
+  nvidia-smi -L || true
+else
+  echo "nvidia-smi: NOT FOUND"
+fi
+echo
+
+echo "## Apptainer"
+if command -v apptainer >/dev/null 2>&1; then
+  apptainer --version || true
+else
+  echo "apptainer: NOT FOUND"
+fi
+echo
+
+echo "## Slurm/Munge packages"
+dpkg -l | grep -E '^(ii)\s+(slurm|munge)' || true
+echo
+
+log "==== sg-precheck done ===="
+log "Log: $OUT"

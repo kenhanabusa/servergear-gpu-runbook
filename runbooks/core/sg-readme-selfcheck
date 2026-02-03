@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  cat <<'USAGE'
+sg-readme-selfcheck: README手順に沿った「確認コマンド」をまとめて実行してログ保存する（非破壊チェック）
+
+Usage:
+  sg-readme-selfcheck [--readme PATH] [--sif PATH] [--outdir DIR] [--full] [--fix-timeshift-default] [--help]
+
+Options:
+  --readme PATH             対象README (default: /opt/sg-demo/README.md)
+  --sif PATH                Apptainer SIF (default: /opt/containers/ngc_pytorch_25.11-py3.sif)
+  --outdir DIR              出力先DIR (default: /opt/sg-demo/support または ~/sg-demo-support)
+  --full                    GPU/Slurmの“計算デモ”も実行（非破壊だが時間がかかる）
+  --fix-timeshift-default   Timeshiftが認識できるよう default subvol=5 に補正（※変更を伴う）
+  --help                    help
+
+Notes:
+  - cloner/sg-shipping-mode/Timeshift/Slurm の「動作確認」は行うが、クローン等の破壊操作は行わない
+  - --fix-timeshift-default は“変更”が入るので、必要なときだけ
+USAGE
+}
+
+README="/opt/sg-demo/README.md"
+SIF="/opt/containers/ngc_pytorch_25.11-py3.sif"
+OUTDIR=""
+FULL=0
+FIX_TS=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --readme) README="$2"; shift 2;;
+    --sif) SIF="$2"; shift 2;;
+    --outdir) OUTDIR="$2"; shift 2;;
+    --full) FULL=1; shift;;
+    --fix-timeshift-default) FIX_TS=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) echo "[ERROR] unknown arg: $1" >&2; usage; exit 2;;
+  esac
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+pick_outdir() {
+  if [[ -n "$OUTDIR" ]]; then
+    mkdir -p "$OUTDIR" 2>/dev/null || true
+    if [[ -d "$OUTDIR" && -w "$OUTDIR" ]]; then
+      echo "$OUTDIR"
+      return 0
+    fi
+    echo "[WARN] OUTDIR not writable: $OUTDIR" >&2
+  fi
+  for d in "/opt/sg-demo/support" "$HOME/sg-demo-support" "/tmp/sg-demo-support"; do
+    mkdir -p "$d" 2>/dev/null || true
+    if [[ -d "$d" && -w "$d" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  echo "[ERROR] cannot find writable outdir" >&2
+  exit 1
+}
+
+OUTBASE="$(pick_outdir)"
+TS="$(date +%Y%m%d_%H%M%S)"
+HOST="$(hostname -s 2>/dev/null || hostname)"
+OUTDIR="${OUTBASE}/readme_selfcheck_${HOST}_${TS}"
+mkdir -p "$OUTDIR"
+
+LOG="$OUTDIR/run.log"
+SUMMARY="$OUTDIR/SUMMARY.txt"
+touch "$LOG" "$SUMMARY"
+chmod 0644 "$LOG" "$SUMMARY" || true
+
+# stdout/stderr を全てログへ
+exec > >(tee -a "$LOG") 2>&1
+
+info() { echo "[INFO] $*"; }
+warn() { echo "[WARN] $*"; }
+fail() { echo "[FAIL] $*"; FAILS+=("$*"); }
+ok()   { echo "[OK] $*"; }
+
+FAILS=()
+
+section() {
+  echo
+  echo "================================================================================"
+  echo "$*"
+  echo "================================================================================"
+}
+
+run_cmd() {
+  local name="$1"; shift
+  section "CMD: $name"
+  echo "+ $*"
+  # shellcheck disable=SC2068
+  if "$@"; then
+    ok "$name"
+  else
+    fail "$name (exit=$?)"
+  fi
+}
+
+# root権限チェック（必要なコマンドが多いので）
+if [[ ${EUID:-999} -ne 0 ]]; then
+  info "Re-exec with sudo..."
+  exec sudo -E "$0" \
+    --readme "$README" \
+    --sif "$SIF" \
+    ${OUTDIR:+--outdir "$OUTBASE"} \
+    $([[ "$FULL" -eq 1 ]] && echo --full) \
+    $([[ "$FIX_TS" -eq 1 ]] && echo --fix-timeshift-default)
+fi
+
+section "Basic info"
+date -Is || true
+echo "HOST=$HOST"
+echo "OUTDIR=$OUTDIR"
+echo "README=$README"
+echo "SIF=$SIF"
+
+section "Check README file"
+if [[ -f "$README" ]]; then
+  ok "README exists: $README"
+  ls -lah "$README" || true
+else
+  warn "README not found: $README (manual may still be elsewhere)"
+fi
+
+section "System info"
+run_cmd "uname" uname -a
+run_cmd "os-release" bash -lc 'cat /etc/os-release || true'
+run_cmd "cmdline" bash -lc 'cat /proc/cmdline || true'
+run_cmd "df" df -h
+run_cmd "lsblk" lsblk -f -o NAME,SIZE,TYPE,TRAN,FSTYPE,LABEL,UUID,PARTUUID,MOUNTPOINTS
+
+section "UEFI boot entries (efibootmgr)"
+if have efibootmgr; then
+  run_cmd "efibootmgr" efibootmgr -v
+else
+  warn "efibootmgr not installed"
+fi
+
+section "Timeshift / BTRFS status"
+if have btrfs; then
+  run_cmd "root findmnt" bash -lc 'findmnt -no SOURCE,FSTYPE,OPTIONS /'
+  run_cmd "btrfs usage"  bash -lc 'btrfs filesystem usage -T / || true'
+  run_cmd "btrfs df"     bash -lc 'btrfs filesystem df / || true'
+  run_cmd "btrfs subvol list" bash -lc 'btrfs subvolume list -t / | head -n 200 || true'
+  run_cmd "btrfs default (on /)" bash -lc 'btrfs subvolume get-default / || true'
+else
+  warn "btrfs command not found"
+fi
+
+if have timeshift; then
+  run_cmd "timeshift --list" timeshift --list || true
+  run_cmd "timeshift.json head" bash -lc 'sed -n "1,120p" /etc/timeshift/timeshift.json 2>/dev/null || true'
+else
+  warn "timeshift not installed"
+fi
+
+# 任意：default subvol を FS_TREE(=5) に補正（Timeshift の “system disk” 判定対策）
+if [[ "$FIX_TS" -eq 1 ]]; then
+  section "FIX: Timeshift default subvolume -> FS_TREE(=5)  (CHANGES SYSTEM)"
+  DEV="$(findmnt -no SOURCE / | sed 's/\[.*\]//')"
+  echo "[INFO] root device = $DEV"
+  MNT=/mnt/sg-ts-fix-top
+  mkdir -p "$MNT"
+  run_cmd "mount top-level" mount -o subvolid=5 "$DEV" "$MNT"
+  run_cmd "before get-default" btrfs subvolume get-default "$MNT" || true
+  run_cmd "set-default 5" btrfs subvolume set-default 5 "$MNT"
+  run_cmd "after get-default" btrfs subvolume get-default "$MNT" || true
+  umount "$MNT" || true
+  rmdir "$MNT" || true
+  run_cmd "timeshift --list (after fix)" timeshift --list || true
+else
+  info "Skip --fix-timeshift-default (no changes)"
+fi
+
+section "GPU status"
+if have nvidia-smi; then
+  run_cmd "nvidia-smi" nvidia-smi
+  run_cmd "nvidia-smi -L" nvidia-smi -L
+  run_cmd "nvidia-smi topo -m" nvidia-smi topo -m || true
+else
+  warn "nvidia-smi not found"
+fi
+
+section "Apptainer container check"
+if have apptainer; then
+  run_cmd "apptainer --version" apptainer --version
+  if [[ -f "$SIF" ]]; then
+    ok "SIF exists: $SIF"
+    ls -lah "$SIF" || true
+    # GPUが見えるか
+    run_cmd "apptainer exec --nv nvidia-smi" apptainer exec --nv "$SIF" nvidia-smi -L
+    # torch/cuda/nccl
+    run_cmd "torch + nccl versions" apptainer exec --nv -B /opt/sg-demo:/opt/sg-demo "$SIF" python3 - <<'PY'
+import torch
+print("torch =", torch.__version__)
+print("torch.version.cuda =", torch.version.cuda)
+try:
+    print("nccl =", torch.cuda.nccl.version())
+except Exception as e:
+    print("nccl = <failed>", e)
+print("device_count =", torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
+PY
+  else
+    fail "SIF missing: $SIF"
+  fi
+else
+  warn "apptainer not installed"
+fi
+
+section "Slurm status"
+if have sinfo; then
+  run_cmd "sinfo" sinfo
+  run_cmd "scontrol show node" bash -lc 'scontrol show node "$(hostname -s)" | egrep -i "NodeName=|State=|Reason=|Gres=|CfgTRES|AllocTRES" || true'
+else
+  warn "slurm client commands not found (sinfo)"
+fi
+
+if have systemctl; then
+  run_cmd "munge/slurm services" bash -lc 'systemctl --no-pager -l status munge slurmctld slurmd 2>/dev/null | sed -n "1,220p" || true'
+fi
+
+section "Tools presence (cloner / sg-shipping-mode / sg-fix-timeshift-default-subvol)"
+for cmd in cloner sg-shipping-mode sg-fix-timeshift-default-subvol; do
+  if have "$cmd"; then
+    ok "found: $cmd -> $(command -v "$cmd")"
+    ls -lah "$(command -v "$cmd")" || true
+  else
+    warn "missing: $cmd"
+  fi
+done
+
+if have cloner; then
+  run_cmd "cloner --list" cloner --list
+fi
+
+# FULL: デモ実行（時間がかかる）
+if [[ "$FULL" -eq 1 ]]; then
+  section "FULL: GPU/Slurm demo (non-destructive, may take time)"
+  if have srun && have apptainer && [[ -f "$SIF" ]]; then
+    run_cmd "srun 1GPU sg-pytorch-demo (if present)" bash -lc '
+      if command -v sg-pytorch-demo >/dev/null 2>&1; then
+        srun -p gpu --ntasks=1 --gres=gpu:1 --cpus-per-task=8 --mem=8G \
+          bash -lc "apptainer exec --nv -B /opt/sg-demo:/opt/sg-demo '"$SIF"' python3 /opt/sg-demo/pytorch/pytorch_rtxpro6000_demo.py --matmul-n 8192 --train-batch 1024 --train-steps 50" || true
+      else
+        echo "[INFO] sg-pytorch-demo not found; skip"
+      fi
+    '
+  else
+    warn "Skip FULL demo (missing srun/apptainer/SIF)"
+  fi
+else
+  info "Skip --full demo"
+fi
+
+section "Write SUMMARY"
+{
+  echo "Collected at: $(date -Is)"
+  echo "Host: $HOST"
+  echo "Outdir: $OUTDIR"
+  echo "README: $README"
+  echo "SIF: $SIF"
+  echo
+  if ((${#FAILS[@]})); then
+    echo "[RESULT] FAIL (has failures)"
+    printf ' - %s\n' "${FAILS[@]}"
+  else
+    echo "[RESULT] OK"
+  fi
+  echo
+  echo "Log: $LOG"
+} | tee "$SUMMARY"
+
+# exit code: 0 if no failures, 1 otherwise
+if ((${#FAILS[@]})); then
+  exit 1
+fi
+exit 0

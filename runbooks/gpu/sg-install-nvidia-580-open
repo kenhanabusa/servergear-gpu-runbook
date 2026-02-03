@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/var/log/sg-runbook"
+LOG="${LOG_DIR}/install_nvidia_580_open_${TS}.log"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG") 2>&1
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*"; }
+
+usage(){
+  cat <<'USAGE'
+Usage: sg-install-nvidia-580-open [--reboot]
+  --reboot  reboot at end (only if you want; install may require reboot)
+USAGE
+}
+
+REBOOT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reboot) REBOOT=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+  shift
+done
+
+[[ $EUID -eq 0 ]] || die "run as root"
+
+log "==== sg-install-nvidia-580-open start ===="
+log "log: $LOG"
+log "kernel: $(uname -r)"
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y ubuntu-drivers-common dkms "linux-headers-$(uname -r)"
+
+log "installing: nvidia-driver-580-open nvidia-utils-580"
+apt-get install -y nvidia-driver-580-open nvidia-utils-580
+
+log "quick check: nvidia-smi"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi || warn "nvidia-smi failed (reboot may be required)"
+  nvidia-smi -L || true
+else
+  warn "nvidia-smi not found yet (reboot may be required)"
+fi
+
+if command -v mokutil >/dev/null 2>&1; then
+  mokutil --sb-state || true
+fi
+
+if [[ $REBOOT -eq 1 ]]; then
+  warn "rebooting..."
+  reboot
+fi
+
+log "==== sg-install-nvidia-580-open done ===="
+log "log: $LOG"

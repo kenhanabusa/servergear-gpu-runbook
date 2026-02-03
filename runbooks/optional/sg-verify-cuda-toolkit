@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-verify-cuda-toolkit [--nvcc /usr/local/cuda/bin/nvcc] [--cc 120]
+
+Fix:
+  - Compile SASS for the detected GPU (sm_<cc>) to avoid PTX JIT mismatch.
+USAGE
+}
+
+NVCC="/usr/local/cuda/bin/nvcc"
+CC_OVERRIDE=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --nvcc) NVCC="${2:-}"; shift 2;;
+    --cc) CC_OVERRIDE="${2:-}"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2;;
+  esac
+done
+
+LOG="/var/log/sg-runbook/verify_cuda_toolkit_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[INFO] ==== sg-verify-cuda-toolkit start ===="
+echo "[INFO] log: ${LOG}"
+
+command -v nvidia-smi >/dev/null 2>&1 || { echo "ERROR: nvidia-smi not found" >&2; exit 1; }
+nvidia-smi -L || true
+
+if [ ! -x "$NVCC" ]; then
+  NVCC="$(command -v nvcc 2>/dev/null || true)"
+fi
+[ -n "$NVCC" ] && [ -x "$NVCC" ] || { echo "ERROR: nvcc not found. Install CUDA Toolkit first." >&2; exit 1; }
+
+# Detect compute capability (e.g. 12.0 -> 120)
+cc_dot=""
+if [ -n "$CC_OVERRIDE" ]; then
+  cc="${CC_OVERRIDE//./}"
+else
+  cc_dot="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ' || true)"
+  if [ -z "$cc_dot" ]; then
+    cc_dot="$(nvidia-smi -q 2>/dev/null | awk -F: '/Compute Capability/ {gsub(/^[ \t]+/,"",$2); print $2; exit}' || true)"
+  fi
+  cc="${cc_dot//./}"
+fi
+
+if ! [[ "$cc" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: Could not detect compute capability. Try: sg-verify-cuda-toolkit --cc 120" >&2
+  exit 1
+fi
+
+echo "[INFO] nvcc: ${NVCC}"
+"$NVCC" --version
+
+echo "[INFO] compile target: compute_${cc} / sm_${cc} (SASS only; avoids PTX JIT mismatch)"
+GENCODE=(--generate-code "arch=compute_${cc},code=sm_${cc}")
+
+tmp="$(mktemp -d /tmp/sg-cuda-test.XXXXXX)"
+trap 'rm -rf "$tmp"' EXIT
+
+cat > "${tmp}/cuda_smoke.cu" <<'CU_EOF'
+#include <cstdio>
+#include <cuda_runtime.h>
+
+__global__ void k(float* x, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) x[i] = (float)i;
+}
+
+static void ck(cudaError_t e, const char* msg) {
+  if (e != cudaSuccess) {
+    std::printf("CUDA ERROR: %s: %s\n", msg, cudaGetErrorString(e));
+    std::exit(1);
+  }
+}
+
+int main() {
+  int count = 0;
+  ck(cudaGetDeviceCount(&count), "cudaGetDeviceCount");
+  std::printf("CUDA devices: %d\n", count);
+  if (count <= 0) return 1;
+
+  for (int i = 0; i < count; i++) {
+    cudaDeviceProp p{};
+    ck(cudaGetDeviceProperties(&p, i), "cudaGetDeviceProperties");
+    std::printf("[%d] %s  cc=%d.%d  mem=%zuMB\n",
+      i, p.name, p.major, p.minor, (size_t)p.totalGlobalMem/(1024*1024));
+  }
+
+  ck(cudaSetDevice(0), "cudaSetDevice(0)");
+
+  const int n = 4096;
+  float *d = nullptr;
+  ck(cudaMalloc(&d, n * sizeof(float)), "cudaMalloc");
+  k<<<(n+255)/256, 256>>>(d, n);
+  ck(cudaGetLastError(), "kernel launch");
+  ck(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+  ck(cudaFree(d), "cudaFree");
+
+  std::printf("Kernel launch OK\n");
+  return 0;
+}
+CU_EOF
+
+echo "[INFO] compiling..."
+"$NVCC" -O2 -std=c++17 "${GENCODE[@]}" -o "${tmp}/cuda_smoke" "${tmp}/cuda_smoke.cu"
+
+echo "[INFO] running..."
+"${tmp}/cuda_smoke" | sed -n '1,80p'
+
+echo "[INFO] ==== sg-verify-cuda-toolkit done ===="
+echo "[INFO] log: ${LOG}"

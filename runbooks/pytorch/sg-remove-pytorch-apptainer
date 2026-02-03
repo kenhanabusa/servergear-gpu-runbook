@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMON=/usr/local/lib/sg-runbook/lib/common.sh
+if [[ -r "$COMMON" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  source "$COMMON"
+fi
+
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*" >&2; }
+die(){ echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-remove-pytorch-apptainer [--dir DIR]
+
+What it does:
+  - Removes the SIF directory created by sg-install-pytorch-apptainer
+
+Options:
+  --dir DIR   Base dir (default: /opt/sg/containers/pytorch)
+  -h, --help  Show this help
+
+Example:
+  sg-remove-pytorch-apptainer
+USAGE
+}
+
+BASE_DIR="/opt/sg/containers/pytorch"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir) BASE_DIR="${2:-}"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1";;
+  esac
+done
+
+mkdir -p /var/log/sg-runbook
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOGF="/var/log/sg-runbook/remove_pytorch_apptainer_${RUN_TS}.log"
+exec > >(tee -a "$LOGF") 2>&1
+
+log "==== sg-remove-pytorch-apptainer start ===="
+log "log: $LOGF"
+log "dir: $BASE_DIR"
+
+if [[ ! -e "$BASE_DIR" ]]; then
+  log "Nothing to remove (dir not found)."
+  log "==== sg-remove-pytorch-apptainer done ===="
+  exit 0
+fi
+
+rm -rf "$BASE_DIR"
+log "Removed: $BASE_DIR"
+log "==== sg-remove-pytorch-apptainer done ===="

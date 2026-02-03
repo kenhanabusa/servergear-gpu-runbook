@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+
+if ! have_cmd nvidia-smi; then
+  die "nvidia-smi not found"
+fi
+
+nvidia-smi
+echo
+nvidia-smi -L
+
+count="$(nvidia-smi -L | wc -l)"
+log "GPU count detected: $count"

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Server Gear / Shipping support information collector
+# - Collects non-sensitive system info into a tar.gz for support / documentation.
+
+OUT_BASE="${OUT_BASE:-/opt/sg-demo/support}"
+TS="$(date +%F_%H%M%S)"
+HOST="$(hostname -s 2>/dev/null || hostname)"
+OUT_DIR="$OUT_BASE/collect_${HOST}_${TS}"
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "[ERROR] missing command: $1" >&2
+    exit 1
+  }
+}
+
+# Basic requirements
+need_cmd uname
+need_cmd awk
+need_cmd sed
+need_cmd tar
+need_cmd mkdir
+need_cmd tee
+
+if [[ $EUID -ne 0 ]]; then
+  echo "[ERROR] Please run as root: sudo $0" >&2
+  exit 1
+fi
+
+mkdir -p "$OUT_DIR" "$OUT_DIR/cmd" "$OUT_DIR/files" "$OUT_DIR/files/etc" "$OUT_DIR/files/opt" "$OUT_DIR/files/root" || true
+
+exec > >(tee "$OUT_DIR/collect.log") 2>&1
+
+echo "=== SG Collect Info ==="
+ echo "date: $TS"
+ echo "host: $HOST"
+ echo "out : $OUT_DIR"
+ echo
+
+run_cmd() {
+  local name="$1"; shift
+  echo "[CMD] $*"
+  ("$@") >"$OUT_DIR/cmd/${name}.txt" 2>&1 || true
+}
+
+copy_file() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" ]]; then
+    mkdir -p "$(dirname "$dst")" || true
+    cp -a "$src" "$dst" 2>/dev/null || true
+  fi
+}
+
+# --- System basics ---
+run_cmd os_release cat /etc/os-release
+run_cmd uname uname -a
+run_cmd cmdline cat /proc/cmdline
+run_cmd lsb_release bash -lc 'lsb_release -a' 
+run_cmd uptime uptime
+run_cmd cpu lscpu
+run_cmd mem free -h
+run_cmd df df -h
+run_cmd mounts bash -lc 'mount | sed -e "s/ \+/ /g"'
+
+# --- Hardware / PCI / GPU ---
+run_cmd lsblk lsblk -a -o NAME,SIZE,TYPE,MODEL,SERIAL,WWN,TRAN,MOUNTPOINTS,FSTYPE,UUID,PARTUUID,LABEL
+run_cmd blkid blkid
+run_cmd fdisk bash -lc 'fdisk -l'
+run_cmd nvme bash -lc 'nvme list'
+run_cmd lspci bash -lc 'lspci -nn'
+run_cmd lspci_tree bash -lc 'lspci -t'
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  run_cmd nvidia_smi nvidia-smi
+  run_cmd nvidia_smi_query bash -lc 'nvidia-smi --query-gpu=index,pci.bus_id,name,driver_version,vbios_version,temperature.gpu,power.draw,power.limit,memory.total --format=csv,noheader'
+fi
+
+# --- Boot / UEFI ---
+if command -v efibootmgr >/dev/null 2>&1; then
+  run_cmd efibootmgr efibootmgr -v
+fi
+
+# --- Btrfs / Timeshift ---
+if command -v btrfs >/dev/null 2>&1; then
+  run_cmd btrfs_show btrfs filesystem show
+fi
+
+if command -v timeshift >/dev/null 2>&1; then
+  run_cmd timeshift_version timeshift --version
+  run_cmd timeshift_list bash -lc 'timeshift --list 2>/dev/null || true'
+fi
+
+# --- Slurm / Apptainer ---
+if command -v sinfo >/dev/null 2>&1; then
+  run_cmd slurm_version sinfo --version
+  run_cmd sinfo sinfo -o '%P %a %l %D %N'
+  run_cmd scontrol_node bash -lc 'scontrol show node $(hostname -s)'
+fi
+
+if command -v apptainer >/dev/null 2>&1; then
+  run_cmd apptainer_version apptainer --version
+  run_cmd apptainer_config bash -lc 'apptainer config global'
+  run_cmd apptainer_cache bash -lc 'apptainer cache list 2>/dev/null || true'
+fi
+
+# --- Key config files (safe subset) ---
+copy_file /etc/fstab "$OUT_DIR/files/etc/fstab"
+copy_file /etc/default/grub "$OUT_DIR/files/etc/default/grub"
+copy_file /etc/gdm3/custom.conf "$OUT_DIR/files/etc/gdm3/custom.conf"
+copy_file /etc/lightdm/lightdm.conf "$OUT_DIR/files/etc/lightdm/lightdm.conf"
+copy_file /etc/timeshift/timeshift.json "$OUT_DIR/files/etc/timeshift/timeshift.json"
+copy_file /etc/slurm/slurm.conf "$OUT_DIR/files/etc/slurm/slurm.conf"
+copy_file /etc/slurm/gres.conf "$OUT_DIR/files/etc/slurm/gres.conf"
+
+# --- Server Gear / demo scripts (if present) ---
+copy_file /opt/sg-demo/slurm/env_nccl_socket_safe.sh "$OUT_DIR/files/opt/sg-demo/slurm/env_nccl_socket_safe.sh"
+copy_file /opt/sg-demo/slurm/env_nccl_p2p_fast.sh "$OUT_DIR/files/opt/sg-demo/slurm/env_nccl_p2p_fast.sh"
+copy_file /opt/sg-demo/pytorch/sg_ddp_microtrain_torchrun.py "$OUT_DIR/files/opt/sg-demo/pytorch/sg_ddp_microtrain_torchrun.py"
+copy_file /opt/sg-demo/pytorch/sg_nccl_smoke_slurm.py "$OUT_DIR/files/opt/sg-demo/pytorch/sg_nccl_smoke_slurm.py"
+
+# Clone scripts (if present)
+copy_file /root/clone_prod_rescue_v5.sh "$OUT_DIR/files/root/clone_prod_rescue_v5.sh"
+copy_file /root/clone_postcheck.sh "$OUT_DIR/files/root/clone_postcheck.sh"
+copy_file /root/clone_with_log.sh "$OUT_DIR/files/root/clone_with_log.sh"
+
+# --- Journal (bounded) ---
+if command -v journalctl >/dev/null 2>&1; then
+  run_cmd journal_boot bash -lc 'journalctl -b -0 --no-pager -n 300'
+  run_cmd journal_gdm bash -lc 'journalctl -b -0 -u gdm3 --no-pager -n 200'
+fi
+
+# --- Pack ---
+TARBALL="$OUT_BASE/${HOST}_collect_${TS}.tar.gz"
+mkdir -p "$OUT_BASE" || true
+
+tar -C "$OUT_BASE" -czf "$TARBALL" "$(basename "$OUT_DIR")"
+
+echo
+echo "[OK] Collected info: $TARBALL"
+echo "     (dir: $OUT_DIR)"

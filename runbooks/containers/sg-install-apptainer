@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+ensure_log_dir
+
+OUT="$RB_LOG_DIR/install_apptainer_$(_rb_now).log"
+exec > >(tee -a "$OUT") 2>&1
+
+log "==== sg-install-apptainer start ===="
+
+if have_cmd apptainer; then
+  log "apptainer already installed: $(apptainer --version || true)"
+  exit 0
+fi
+
+APPLY="${RB_APPLY_APPTAINER:-/usr/local/sbin/apply_install_apptainer.sh}"
+if [[ -x "$APPLY" ]]; then
+  log "Running: $APPLY"
+  "$APPLY"
+  log "Install script finished."
+else
+  die "apply script not found or not executable: $APPLY (set RB_APPLY_APPTAINER=... if different)"
+fi
+
+log "==== sg-install-apptainer done ===="
+log "Log: $OUT"

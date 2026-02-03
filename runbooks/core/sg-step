@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  sg-step <STEP_NAME> -- <command...>
+
+Behavior:
+  1) Create PRE_<STEP_NAME> snapshot
+  2) Run command
+  3) If success: create GOOD_<STEP_NAME> snapshot AND delete the PRE snapshot
+  4) If fail: keep PRE snapshot and show restore command
+
+Optional:
+  SG_AUTO_ROLLBACK=1  -> after failure, run restore to PRE snapshot (still requires reboot)
+
+Example:
+  sg-step initramfs_fix -- sg-fix-initramfs-compress
+  sg-step slurm_install_mycluster -- sg-install-slurm-single --cluster mycluster
+USAGE
+  exit 2
+}
+
+step="${1:-}"
+[[ -n "$step" ]] || usage
+shift || true
+
+[[ "${1:-}" == "--" ]] || usage
+shift || true
+[[ $# -gt 0 ]] || usage
+
+if ! have_cmd sg-ts; then
+  die "sg-ts not found"
+fi
+
+ensure_log_dir
+OUT="$RB_LOG_DIR/step_${step}_$(_rb_now).log"
+exec > >(tee -a "$OUT") 2>&1
+
+pre_desc="PRE_${step}"
+good_desc="GOOD_${step}"
+
+log "==== sg-step start: $step ===="
+log "Creating PRE snapshot: $pre_desc"
+pre_snap="$(sg-ts create "$pre_desc" | tail -n1)"
+log "PRE snapshot created: $pre_snap"
+
+log "Running command: $*"
+set +e
+"$@"
+rc=$?
+set -e
+
+if [[ $rc -ne 0 ]]; then
+  log "Command FAILED (rc=$rc)."
+  log "To rollback:"
+  log "  sudo sg-ts restore $pre_snap"
+  if [[ "${SG_AUTO_ROLLBACK:-0}" == "1" ]]; then
+    log "SG_AUTO_ROLLBACK=1 -> running restore now"
+    sg-ts restore "$pre_snap"
+  fi
+  exit $rc
+fi
+
+log "Command succeeded."
+log "Creating GOOD snapshot: $good_desc"
+good_snap="$(sg-ts create "$good_desc" | tail -n1)"
+log "GOOD snapshot created: $good_snap"
+
+log "Deleting PRE snapshot (to keep only GOOD states): $pre_snap"
+sg-ts delete "$pre_snap"
+
+log "==== sg-step done: $step ===="
+log "Log: $OUT"

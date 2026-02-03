@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+ensure_log_dir
+
+OUT="$RB_LOG_DIR/install_docker_gpu_$(_rb_now).log"
+exec > >(tee -a "$OUT") 2>&1
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  sg-install-docker [--add-user USER]...
+
+Behavior:
+  - GPU server only: requires nvidia-smi to work.
+  - Installs Docker Engine from Docker's official apt repository.
+  - Installs NVIDIA Container Toolkit (apt repo) and configures Docker runtime via nvidia-ctk.
+  - By default, DOES NOT add any user to the docker group (security).
+USAGE
+  exit 2
+}
+
+ADD_USERS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --add-user) ADD_USERS+=("${2:-}"); shift 2 ;;
+    -h|--help) usage ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+log "==== sg-install-docker (GPU) start ===="
+
+# ---- GPU precheck ----
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  die "nvidia-smi not found. This runbook is GPU-server only."
+fi
+log "GPU detected (nvidia-smi present)."
+nvidia-smi -L || die "nvidia-smi failed. Fix NVIDIA driver first."
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ---- Docker Engine (official repo) ----
+conflicts=(docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc)
+installed=()
+for p in "${conflicts[@]}"; do
+  if dpkg -s "$p" >/dev/null 2>&1; then installed+=("$p"); fi
+done
+if [[ ${#installed[@]} -gt 0 ]]; then
+  log "Removing conflicting packages: ${installed[*]}"
+  apt-get update
+  apt-get remove -y "${installed[@]}"
+fi
+
+apt-get update
+apt-get install -y ca-certificates curl
+
+need_repo="yes"
+if [[ -f /etc/apt/sources.list.d/docker.sources ]] && grep -q 'download.docker.com' /etc/apt/sources.list.d/docker.sources; then
+  need_repo="no"
+fi
+if [[ -f /etc/apt/sources.list.d/docker.list ]] && grep -q 'download.docker.com' /etc/apt/sources.list.d/docker.list; then
+  need_repo="no"
+fi
+
+if [[ "$need_repo" == "yes" ]]; then
+  log "Setting up Docker apt repository"
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
+  printf "Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nSigned-By: /etc/apt/keyrings/docker.asc\n" \
+    "$codename" > /etc/apt/sources.list.d/docker.sources
+else
+  log "Docker apt repository already configured (skip)"
+fi
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker.service containerd.service
+
+# Optional: docker group (root-equivalent)
+if [[ ${#ADD_USERS[@]} -gt 0 ]]; then
+  getent group docker >/dev/null || groupadd docker
+  for u in "${ADD_USERS[@]}"; do
+    [[ -n "$u" ]] || continue
+    if id "$u" >/dev/null 2>&1; then
+      usermod -aG docker "$u"
+      log "Added user to docker group: $u (requires re-login or 'newgrp docker')"
+    else
+      log "WARN: user not found: $u"
+    fi
+  done
+else
+  log "NOTE: docker group unchanged. Use sudo to run docker, or rerun with: sg-install-docker --add-user <user>"
+fi
+
+# ---- NVIDIA Container Toolkit (apt repo) ----
+# Per NVIDIA docs: install prereqs curl, gnupg2; configure repo; install toolkit.
+apt-get update
+apt-get install -y --no-install-recommends curl gnupg2
+
+if [[ ! -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg ]] || [[ ! -f /etc/apt/sources.list.d/nvidia-container-toolkit.list ]]; then
+  log "Configuring NVIDIA Container Toolkit apt repository"
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+else
+  log "NVIDIA Container Toolkit apt repository already configured (skip)"
+fi
+
+apt-get update
+apt-get install -y nvidia-container-toolkit
+
+# Configure Docker runtime via nvidia-ctk (backs up daemon.json if exists)
+if [[ -f /etc/docker/daemon.json ]]; then
+  bk="/etc/docker/daemon.json.bak.$(_rb_now)"
+  cp -av /etc/docker/daemon.json "$bk"
+  log "Backed up /etc/docker/daemon.json -> $bk"
+fi
+
+log "Configuring Docker runtime (nvidia-ctk runtime configure --runtime=docker)"
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+
+# quick sanity
+docker --version || true
+nvidia-ctk --version || true
+docker info 2>/dev/null | egrep -i 'Runtimes:|Default Runtime:|CDI' || true
+
+log "==== sg-install-docker (GPU) done ===="
+log "Log: $OUT"

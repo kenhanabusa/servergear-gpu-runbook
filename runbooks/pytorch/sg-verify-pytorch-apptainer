@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMON=/usr/local/lib/sg-runbook/lib/common.sh
+if [[ -r "$COMMON" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  source "$COMMON"
+fi
+
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*" >&2; }
+die(){ echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-verify-pytorch-apptainer [--dir DIR] [--sif PATH] [--cpu] [--quick]
+
+What it does:
+  - Runs a small PyTorch check inside the SIF via Apptainer
+  - Default is GPU check: torch.cuda.is_available() must be True
+  - --cpu allows CPU-only import check
+
+Options:
+  --dir DIR   Base dir (default: /opt/sg/containers/pytorch)
+  --sif PATH  SIF path (overrides --dir/current.sif)
+  --cpu       CPU-only check (skip --nv and do not require CUDA)
+  --quick     Only checks cuda availability/device info (skip matmul)
+  -h, --help  Show this help
+
+Examples:
+  sg-verify-pytorch-apptainer
+  sg-verify-pytorch-apptainer --quick
+  sg-verify-pytorch-apptainer --cpu
+  sg-verify-pytorch-apptainer --sif /path/to/pytorch.sif
+USAGE
+}
+
+BASE_DIR="/opt/sg/containers/pytorch"
+SIF_PATH=""
+CPU_ONLY=0
+QUICK=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir) BASE_DIR="${2:-}"; shift 2;;
+    --sif) SIF_PATH="${2:-}"; shift 2;;
+    --cpu) CPU_ONLY=1; shift;;
+    --quick) QUICK=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1";;
+  esac
+done
+
+mkdir -p /var/log/sg-runbook
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOGF="/var/log/sg-runbook/verify_pytorch_apptainer_${RUN_TS}.log"
+exec > >(tee -a "$LOGF") 2>&1
+
+log "==== sg-verify-pytorch-apptainer start ===="
+log "log: $LOGF"
+
+if ! command -v apptainer >/dev/null 2>&1; then
+  die "apptainer not found. Install it first (sg-install-apptainer)."
+fi
+
+if [[ -z "$SIF_PATH" ]]; then
+  SIF_PATH="${BASE_DIR}/current.sif"
+fi
+
+if [[ ! -e "$SIF_PATH" ]]; then
+  die "SIF not found: $SIF_PATH  (run sg-install-pytorch-apptainer first)"
+fi
+
+log "sif: $SIF_PATH"
+if [[ -e "${BASE_DIR}/current.meta" ]]; then
+  log "meta:"
+  sed 's/^/[INFO]   /' "${BASE_DIR}/current.meta" || true
+fi
+
+NV_ARGS=()
+if [[ $CPU_ONLY -eq 0 ]]; then
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    die "nvidia-smi not found. GPU server expected. Use --cpu for CPU-only check."
+  fi
+  log "host GPU:"
+  nvidia-smi -L || warn "nvidia-smi -L failed"
+  NV_ARGS=(--nv)
+else
+  log "CPU-only mode"
+fi
+
+export SG_CPU_ONLY="$CPU_ONLY"
+export SG_QUICK="$QUICK"
+
+# NOTE: keep the test small to avoid long warmups / huge allocations
+apptainer exec "${NV_ARGS[@]}" "$SIF_PATH" python3 - <<'PY'
+import os, sys
+
+cpu_only = os.environ.get("SG_CPU_ONLY", "0") == "1"
+quick = os.environ.get("SG_QUICK", "0") == "1"
+
+try:
+    import torch
+except Exception as e:
+    print("ERROR: failed to import torch:", repr(e))
+    raise SystemExit(1)
+
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+
+if cpu_only:
+    print("CPU-only check OK (import succeeded).")
+    raise SystemExit(0)
+
+# GPU check
+if not torch.cuda.is_available():
+    print("ERROR: torch.cuda.is_available() is False")
+    raise SystemExit(2)
+
+print("torch CUDA:", torch.version.cuda)
+print("device0:", torch.cuda.get_device_name(0))
+cc = torch.cuda.get_device_capability(0)
+print("compute capability:", f"{cc[0]}.{cc[1]}")
+
+if quick:
+    print("Quick GPU check OK")
+    raise SystemExit(0)
+
+# Small compute smoke test
+x = torch.randn((512, 512), device="cuda")
+y = x @ x
+torch.cuda.synchronize()
+print("matmul OK:", float(y[0, 0]))
+print("GPU smoke test OK")
+PY
+
+log "==== sg-verify-pytorch-apptainer done ===="

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+timestamp(){ date +%Y%m%d_%H%M%S; }
+    set -euo pipefail
+
+    . /usr/local/lib/sg-runbook/lib/common.sh
+
+    require_root
+
+    RB_LOG_DIR="/var/log/sg-runbook"
+    ensure_log_dir "$RB_LOG_DIR"
+    LOG="$RB_LOG_DIR/verify_slurm_genai_demo_$(timestamp).log"
+    exec > >(tee -a "$LOG") 2>&1
+
+    demo_dir="/opt/sg-demos/genai-textgen"
+    partition=""
+    no_wait=0
+
+    usage() {
+      cat <<'USAGE'
+    Usage:
+      sg-verify-slurm-genai-demo [--demo-dir DIR] [--partition NAME] [--no-wait]
+
+    Submits the sbatch script installed by sg-install-slurm-genai-demo, waits for completion,
+    and checks the output contains "== generated text ==".
+
+    Notes:
+      - This script runs as root, but it submits the job as the invoking user (SUDO_USER)
+        when possible, to avoid creating "root jobs".
+
+    Options:
+      --demo-dir DIR     (default: /opt/sg-demos/genai-textgen)
+      --partition NAME   Slurm partition (default: auto-detect first partition)
+      --no-wait          submit only (do not wait / check output)
+      -h, --help         show help
+USAGE
+    }
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --demo-dir) demo_dir="$2"; shift 2;;
+        --partition) partition="$2"; shift 2;;
+        --no-wait) no_wait=1; shift;;
+        -h|--help) usage; exit 0;;
+        *) die "unknown arg: $1 (try --help)";;
+      esac
+    done
+
+    have_cmd sbatch || die "sbatch not found (Slurm not installed?)"
+    have_cmd squeue || die "squeue not found (Slurm not installed?)"
+
+    job="${demo_dir}/slurm/textgen.sbatch"
+    out_dir="${demo_dir}/slurm/out"
+    [[ -f "$job" ]] || die "job script not found: $job (run sg-install-slurm-genai-demo)"
+    [[ -d "$out_dir" ]] || mkdir -p "$out_dir"
+
+    submit_user="${SUDO_USER:-}"
+    if [[ -z "$submit_user" || "$submit_user" == "root" ]]; then
+      submit_user="$(id -un)"
+    fi
+
+    run_as=()
+    if [[ "$(id -un)" == "root" && "$submit_user" != "root" ]]; then
+      run_as=(sudo -u "$submit_user" -H)
+    fi
+
+    if [[ -z "$partition" ]]; then
+      # auto-detect: take first partition name (strip trailing *)
+      partition="$(sinfo -h -o '%P' 2>/dev/null | head -n1 | sed 's/\\*$//' || true)"
+    fi
+
+    
+# normalize default partition marker (strip trailing "*")
+partition="${partition%\*}"
+part_args=()
+    if [[ -n "$partition" ]]; then
+      part_args=(--partition "$partition")
+      log "Using partition: $partition"
+    else
+      log "Partition: (not specified)"
+    fi
+
+    log "Submitting job as user: $submit_user"
+    jid="$("${run_as[@]}" sbatch --parsable "${part_args[@]}" "$job")"
+    log "Submitted job id: $jid"
+
+    if (( no_wait )); then
+      log "--no-wait set; exiting after submit."
+      exit 0
+    fi
+
+    log "Waiting for job to finish..."
+    while true; do
+  squeue_lines="$("${run_as[@]}" squeue -h -j "$jid" 2>/dev/null | wc -l || echo 0)"
+  if [[ "${squeue_lines}" -eq 0 ]]; then
+    break
+  fi
+  sleep 2
+done
+
+    log "Job left the queue. Checking output..."
+
+    # Find output file (job script uses %x-%j.out).
+    out_file="${out_dir}/sg-genai-textgen-${jid}.out"
+    if [[ ! -f "$out_file" ]]; then
+      # fallback: find any *-<jid>.out
+      out_file="$(ls -1 "${out_dir}"/*-"${jid}".out 2>/dev/null | head -n1 || true)"
+    fi
+    [[ -n "$out_file" && -f "$out_file" ]] || die "Output file not found under: $out_dir"
+
+    if grep -q "== generated text ==" "$out_file"; then
+      log "OK: output contains generated text marker."
+      log "Output file: $out_file"
+      tail -n 30 "$out_file" || true
+    else
+      log "---- output head ----"
+      head -n 80 "$out_file" || true
+      log "---- output tail ----"
+      tail -n 120 "$out_file" || true
+      die "Job output did not contain expected marker: '== generated text ==' (see output above)"
+    fi
+
+    log "Done."

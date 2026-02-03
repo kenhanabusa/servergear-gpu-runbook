@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/var/log/sg-runbook"
+LOG="${LOG_DIR}/remove_slurm_single_${TS}.log"
+BK_DIR="/var/backups/sg-runbook/slurm_single_${TS}"
+mkdir -p "$LOG_DIR" "/var/backups/sg-runbook"
+exec > >(tee -a "$LOG") 2>&1
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*"; }
+
+PURGE=0
+PURGE_DATA=0
+REMOVE_USERS=0
+
+usage(){
+  cat <<'USAGE'
+Usage: sg-remove-slurm-single [--purge] [--purge-data] [--remove-users]
+  --purge        apt purge (remove config files too)
+  --purge-data   remove slurm/munge state dirs (backs up /etc first)
+  --remove-users try to remove system users: slurm, munge
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --purge) PURGE=1 ;;
+    --purge-data) PURGE_DATA=1 ;;
+    --remove-users) REMOVE_USERS=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+  shift
+done
+
+[[ $EUID -eq 0 ]] || die "run as root"
+
+log "==== sg-remove-slurm-single start ===="
+log "log: $LOG"
+
+if command -v systemctl >/dev/null 2>&1; then
+  log "stopping services (slurmctld/slurmd/munge)..."
+  systemctl stop slurmctld slurmd munge 2>/dev/null || true
+  systemctl disable slurmctld slurmd munge 2>/dev/null || true
+fi
+
+mkdir -p "$BK_DIR"
+for p in /etc/slurm /etc/munge /etc/default/slurmctld /etc/default/slurmd; do
+  if [[ -e "$p" ]]; then
+    log "backup $p -> $BK_DIR"
+    cp -a "$p" "$BK_DIR/" || true
+  fi
+done
+
+export DEBIAN_FRONTEND=noninteractive
+PKGS=(slurm-wlm slurmctld slurmd slurm-client munge)
+
+if [[ $PURGE -eq 1 ]]; then
+  log "apt purge slurm/munge packages..."
+  apt-get purge -y "${PKGS[@]}" || true
+else
+  log "apt remove slurm/munge packages..."
+  apt-get remove -y "${PKGS[@]}" || true
+fi
+
+log "apt autoremove..."
+apt-get autoremove -y --purge || true
+
+if [[ $PURGE_DATA -eq 1 ]]; then
+  log "remove state dirs"
+  rm -rf /var/spool/slurm* /var/lib/slurm* /var/log/slurm* 2>/dev/null || true
+  rm -rf /var/lib/munge /var/log/munge 2>/dev/null || true
+fi
+
+if [[ $REMOVE_USERS -eq 1 ]]; then
+  log "remove users (best-effort)"
+  id slurm >/dev/null 2>&1 && userdel -r slurm 2>/dev/null || true
+  id munge >/dev/null 2>&1 && userdel -r munge 2>/dev/null || true
+fi
+
+log "==== sg-remove-slurm-single done ===="
+log "log: $LOG"

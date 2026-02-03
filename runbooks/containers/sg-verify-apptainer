@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /usr/local/lib/sg-runbook/lib/common.sh
+require_root
+
+if ! have_cmd apptainer; then
+  die "apptainer not found"
+fi
+
+apptainer --version
+
+if ! have_cmd nvidia-smi; then
+  die "nvidia-smi not found (GPU driver not ready)"
+fi
+
+CUDA_IMAGE="${CUDA_IMAGE:-docker://nvidia/cuda:12.4.1-base-ubuntu22.04}"
+
+log "GPU smoke test via apptainer --nv"
+log "Image: $CUDA_IMAGE"
+apptainer exec --nv "$CUDA_IMAGE" nvidia-smi

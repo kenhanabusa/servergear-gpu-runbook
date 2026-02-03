@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/var/log/sg-runbook"
+LOG="${LOG_DIR}/remove_nvhpc_${TS}.log"
+BK_DIR="/var/backups/sg-runbook/nvhpc_${TS}"
+mkdir -p "$LOG_DIR" "/var/backups/sg-runbook"
+exec > >(tee -a "$LOG") 2>&1
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+log(){ echo "[INFO] $*"; }
+warn(){ echo "[WARN] $*"; }
+
+BRANCH="26.1"      # accepts 26.1 or 26-1
+SUFFIX="-cuda13.0" # e.g. -cuda13.0
+PURGE=0
+KEEP_REPO=0
+PURGE_DATA=0
+
+usage(){
+  cat <<'USAGE'
+Usage: sg-remove-nvhpc [--branch 26.1] [--suffix -cuda13.0] [--purge] [--purge-data] [--keep-repo]
+  --branch X     NVHPC branch (default: 26.1) accepts dot or dash
+  --suffix X     package suffix (default: -cuda13.0)
+  --purge        apt purge
+  --purge-data   remove /opt/nvidia/hpc_sdk/Linux_x86_64/<branch> (backs up first)
+  --keep-repo    keep NVHPC repo/keyring
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --branch) BRANCH="${2:-}"; shift ;;
+    --suffix) SUFFIX="${2:-}"; shift ;;
+    --purge) PURGE=1 ;;
+    --purge-data) PURGE_DATA=1 ;;
+    --keep-repo) KEEP_REPO=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+  shift
+done
+
+[[ $EUID -eq 0 ]] || die "run as root"
+
+# normalize branch forms
+if [[ "$BRANCH" == *-* && "$BRANCH" != *.* ]]; then
+  BRANCH_DOT="${BRANCH//-/.}"
+else
+  BRANCH_DOT="$BRANCH"
+fi
+BRANCH_DASH="${BRANCH_DOT//./-}"
+
+# normalize suffix
+if [[ ! "$SUFFIX" =~ ^- ]]; then
+  SUFFIX="-$SUFFIX"
+fi
+
+PKG="nvhpc-${BRANCH_DASH}${SUFFIX}"
+
+log "==== sg-remove-nvhpc start ===="
+log "branch(dot): $BRANCH_DOT"
+log "package: $PKG"
+log "log: $LOG"
+
+export DEBIAN_FRONTEND=noninteractive
+
+if dpkg -s "$PKG" >/dev/null 2>&1; then
+  if [[ $PURGE -eq 1 ]]; then
+    log "apt purge $PKG..."
+    apt-get purge -y "$PKG" || true
+  else
+    log "apt remove $PKG..."
+    apt-get remove -y "$PKG" || true
+  fi
+else
+  warn "$PKG not installed (skip)"
+fi
+
+log "apt autoremove..."
+apt-get autoremove -y --purge || true
+
+log "remove profile script (if present)"
+rm -f /etc/profile.d/nvhpc.sh || true
+
+if [[ $KEEP_REPO -eq 0 ]]; then
+  log "remove repo files"
+  rm -f /etc/apt/sources.list.d/nvhpc.list || true
+  rm -f /usr/share/keyrings/nvhpc.gpg || true
+fi
+
+if [[ $PURGE_DATA -eq 1 ]]; then
+  mkdir -p "$BK_DIR"
+  ROOT="/opt/nvidia/hpc_sdk/Linux_x86_64/${BRANCH_DOT}"
+  if [[ -d "$ROOT" ]]; then
+    log "backup $ROOT -> $BK_DIR"
+    cp -a "$ROOT" "$BK_DIR/" || true
+    log "remove $ROOT"
+    rm -rf "$ROOT"
+    rmdir -p --ignore-fail-on-non-empty "/opt/nvidia/hpc_sdk/Linux_x86_64" 2>/dev/null || true
+  else
+    warn "$ROOT not found (skip)"
+  fi
+fi
+
+log "==== sg-remove-nvhpc done ===="
+log "log: $LOG"
