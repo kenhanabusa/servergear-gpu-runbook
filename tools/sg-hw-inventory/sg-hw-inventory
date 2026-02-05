@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""sg-hw-inventory (STK-009) - Hardware BOM / Inventory (read-only)
+
+Version: 0.1.1
+
+- Safe-by-default: identifier redaction ON by default (serial/uuid/mac).
+- Full output only with --include-serial or --redact-serial=off (DANGEROUS).
+- Outputs: report.md / report.json / report.csv
+- Best-effort: missing tools do NOT abort. Missing items are recorded.
+
+Supported: Ubuntu 24.04 (best effort; should work on most Linux).
+"""
+
+import argparse
+import csv
+import datetime
+import json
+import os
+import platform
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+APP_NAME = "sg-hw-inventory"
+VERSION = "0.1.1"
+
+def now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+def host() -> str:
+    return platform.node() or os.uname().nodename
+
+def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[bool, str, str]:
+    """Run a command safely. Returns (ok, stdout, stderr)."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (p.returncode == 0), (p.stdout or "").strip(), (p.stderr or "").strip()
+    except FileNotFoundError:
+        return False, "", "missing"
+    except subprocess.TimeoutExpired:
+        return False, "", "timeout"
+    except Exception as e:
+        return False, "", f"error: {e}"
+
+def which(cmd: str) -> Optional[str]:
+    ok, out, _ = run_cmd(["bash","-lc", f"command -v {shlex.quote(cmd)}"], timeout=8)
+    if ok and out:
+        return out.splitlines()[-1].strip()
+    return None
+
+def read_text(path: str) -> Optional[str]:
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except Exception:
+        return None
+
+def json_load_safe(s: str) -> Optional[Any]:
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
+# ------------------------
+# Redaction
+# ------------------------
+def mask_tail(s: str, tail: int = 4) -> str:
+    s = str(s)
+    if not s:
+        return ""
+    if len(s) <= tail:
+        return "*" * max(0, len(s)-1) + s[-1:]
+    return "***" + s[-tail:]
+
+def mask_uuid(s: str) -> str:
+    s = str(s)
+    m = re.search(r"([0-9a-fA-F]{8})$", s.replace("-", ""))
+    return ("***" + m.group(1).lower()) if m else mask_tail(s, 8)
+
+def mask_mac(s: str) -> str:
+    s = str(s).lower()
+    if re.match(r"^[0-9a-f]{12}$", s):
+        s = ":".join([s[i:i+2] for i in range(0, 12, 2)])
+    if not re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", s):
+        return mask_tail(s, 4)
+    parts = s.split(":")
+    return "**:**:**:**:**:" + ":".join(parts[-3:])
+
+def redact_value(kind: str, value: Optional[str], redact: bool) -> Dict[str, Any]:
+    if value is None or value == "":
+        return {"present": False, "redacted": False, "value": ""}
+    if not redact:
+        return {"present": True, "redacted": False, "value": str(value)}
+    if kind == "uuid":
+        return {"present": True, "redacted": True, "value": mask_uuid(str(value))}
+    if kind == "mac":
+        return {"present": True, "redacted": True, "value": mask_mac(str(value))}
+    return {"present": True, "redacted": True, "value": mask_tail(str(value), 4)}
+
+# ------------------------
+# Collectors
+# ------------------------
+def os_pretty() -> str:
+    txt = read_text("/etc/os-release") or ""
+    m = re.search(r'^PRETTY_NAME="?(.*?)"?$', txt, re.M)
+    return m.group(1).strip() if m else ""
+
+def uptime_pretty() -> str:
+    ok, out, _ = run_cmd(["uptime","-p"], timeout=5)
+    if ok and out:
+        return out
+    ok, out, _ = run_cmd(["uptime"], timeout=5)
+    return out
+
+def dmi_sysfs(redact: bool) -> Dict[str, Any]:
+    base = Path("/sys/class/dmi/id")
+    def r(name: str) -> str:
+        p = base / name
+        return (read_text(str(p)) or "") if p.exists() else ""
+    sys_vendor = r("sys_vendor")
+    product_name = r("product_name")
+    product_serial = r("product_serial")
+    bios_version = r("bios_version")
+    bios_date = r("bios_date")
+    board_vendor = r("board_vendor")
+    board_name = r("board_name")
+    board_serial = r("board_serial")
+    return {
+        "system": {
+            "manufacturer": sys_vendor,
+            "product_name": product_name,
+            "serial": redact_value("serial", product_serial, redact),
+            "bios": {"version": bios_version, "date": bios_date},
+        },
+        "baseboard": {
+            "manufacturer": board_vendor,
+            "product_name": board_name,
+            "serial": redact_value("serial", board_serial, redact),
+        }
+    }
+
+def dmidecode_type(types: List[str], timeout: int = 25) -> Tuple[bool, str]:
+    p = which("dmidecode")
+    if not p:
+        return False, "missing"
+    ok, out, err = run_cmd([p, "--type", ",".join(types)], timeout=timeout)
+    if ok and out:
+        return True, out
+    return False, (err or "failed")
+
+def parse_kv(block: str, key: str) -> str:
+    m = re.search(rf"^\s*{re.escape(key)}:\s*(.+)$", block, re.M)
+    return m.group(1).strip() if m else ""
+
+def cpu_info() -> Dict[str, Any]:
+    p = which("lscpu")
+    if p:
+        ok, out, _ = run_cmd([p, "-J"], timeout=10)
+        j = json_load_safe(out) if ok else None
+        if isinstance(j, dict) and isinstance(j.get("lscpu"), list):
+            kv = {i.get("field","").strip(":"): i.get("data") for i in j["lscpu"] if isinstance(i, dict)}
+            return {
+                "model": (kv.get("Model name") or "").strip(),
+                "sockets": (kv.get("Socket(s)") or "").strip(),
+                "cores_per_socket": (kv.get("Core(s) per socket") or "").strip(),
+                "threads_per_core": (kv.get("Thread(s) per core") or "").strip(),
+                "cpus": (kv.get("CPU(s)") or "").strip(),
+                "microcode": (kv.get("Microcode") or "").strip(),
+            }
+    return {}
+
+def mem_info(redact: bool) -> Dict[str, Any]:
+    total_gib = ""
+    ok, out, _ = run_cmd(["free","-b"], timeout=6)
+    if ok:
+        m = re.search(r"^Mem:\s+(\d+)", out, re.M)
+        if m:
+            b = int(m.group(1))
+            total_gib = f"{b/1024/1024/1024:.2f}"
+    dimms=[]
+    okd, txt = dmidecode_type(["memory"], timeout=25)
+    if okd and "Memory Device" in txt:
+        parts = re.split(r"\n\s*Memory Device\s*\n", txt)
+        for part in parts[1:]:
+            size = parse_kv(part, "Size")
+            if size.lower().startswith("no module") or size.lower().startswith("unknown"):
+                continue
+            dimms.append({
+                "locator": parse_kv(part, "Locator"),
+                "size": size,
+                "speed": parse_kv(part, "Speed"),
+                "part_number": parse_kv(part, "Part Number"),
+                "serial": redact_value("serial", parse_kv(part, "Serial Number"), redact),
+            })
+    return {"total_gib": total_gib, "dimms": dimms}
+
+def lspci_gpu_lines() -> str:
+    p = which("lspci")
+    if not p:
+        return ""
+    ok, out, _ = run_cmd([p, "-nn"], timeout=10)
+    if not ok:
+        return ""
+    lines=[]
+    for ln in out.splitlines():
+        if re.search(r"VGA compatible controller|3D controller|Display controller", ln, re.I):
+            lines.append(ln)
+    return "\n".join(lines)
+
+def gpu_info(redact: bool) -> Dict[str, Any]:
+    gpus=[]
+    nvsmi = which("nvidia-smi")
+    if nvsmi:
+        ok, out, _ = run_cmd([nvsmi, "--query-gpu=index,name,pci.bus_id,uuid,serial", "--format=csv,noheader"], timeout=15)
+        if ok and out:
+            for ln in out.splitlines():
+                parts=[p.strip() for p in ln.split(",")]
+                if len(parts) >= 5:
+                    idx,name,pci,uuid,serial = parts[:5]
+                    gpus.append({
+                        "index": idx,
+                        "name": name,
+                        "pci": pci,
+                        "uuid": redact_value("uuid", uuid, redact),
+                        "serial": redact_value("serial", serial, redact),
+                    })
+    return {"gpus": gpus, "lspci_gpu": lspci_gpu_lines()}
+
+def storage_info(redact: bool) -> Dict[str, Any]:
+    nvme_list=[]
+    nvme = which("nvme")
+    if nvme:
+        ok, out, _ = run_cmd([nvme, "list"], timeout=10)
+        if ok and out:
+            for ln in out.splitlines():
+                if ln.startswith("/dev/nvme"):
+                    cols = ln.split()
+                    if len(cols) >= 3:
+                        dev, sn, model = cols[0], cols[1], cols[2]
+                        fw = cols[-1]
+                        nvme_list.append({
+                            "device": dev, "model": model, "fw": fw,
+                            "serial": redact_value("serial", sn, redact),
+                            "raw": ln.strip(),
+                        })
+    disks=[]
+    lsblk = which("lsblk")
+    if lsblk:
+        ok, out, _ = run_cmd([lsblk, "-J", "-o", "NAME,TYPE,SIZE,MODEL,TRAN,SERIAL"], timeout=10)
+        j = json_load_safe(out) if ok else None
+        if isinstance(j, dict) and isinstance(j.get("blockdevices"), list):
+            for d in j["blockdevices"]:
+                if isinstance(d, dict) and d.get("type") == "disk":
+                    disks.append({
+                        "name": d.get("name",""),
+                        "size": d.get("size",""),
+                        "model": d.get("model","") or "",
+                        "transport": d.get("tran","") or "",
+                        "serial": redact_value("serial", d.get("serial") or "", redact),
+                    })
+    return {"nvme": nvme_list, "lsblk_disks": disks}
+
+def network_info(redact: bool) -> Dict[str, Any]:
+    ifs=[]
+    ip = which("ip")
+    if ip:
+        ok, out, _ = run_cmd([ip, "-j", "link"], timeout=10)
+        j = json_load_safe(out) if ok else None
+        if isinstance(j, list):
+            for it in j:
+                if isinstance(it, dict):
+                    ifs.append({
+                        "if": it.get("ifname",""),
+                        "state": it.get("operstate",""),
+                        "mtu": it.get("mtu",""),
+                        "mac": redact_value("mac", it.get("address",""), redact),
+                    })
+    ethtool = which("ethtool")
+    if ethtool:
+        for it in ifs:
+            name = it.get("if") or ""
+            if not name or name == "lo":
+                it["speed"] = ""
+                continue
+            ok, out, _ = run_cmd([ethtool, name], timeout=8)
+            m = re.search(r"^\s*Speed:\s*(.+)$", out, re.M) if ok else None
+            it["speed"] = m.group(1).strip() if m else ""
+    lspci = which("lspci")
+    nic_lines=""
+    if lspci:
+        ok, out, _ = run_cmd([lspci, "-nn"], timeout=10)
+        if ok and out:
+            lines=[ln for ln in out.splitlines() if re.search(r"Ethernet controller|Network controller", ln, re.I)]
+            nic_lines="\n".join(lines)
+    return {"interfaces": ifs, "lspci_nic": nic_lines}
+
+def ipmi_info(redact: bool) -> Dict[str, Any]:
+    ipmitool = which("ipmitool")
+    if not ipmitool:
+        return {"present": False, "notes": "ipmitool missing"}
+    ok, out, _ = run_cmd([ipmitool, "mc", "info"], timeout=10)
+    fw=""
+    if ok:
+        m = re.search(r"Firmware Revision\s*:\s*(.+)$", out, re.M)
+        fw = m.group(1).strip() if m else ""
+    ok, out, _ = run_cmd([ipmitool, "lan", "print", "1"], timeout=10)
+    ip_src=ip_addr=mac=""
+    if ok:
+        m = re.search(r"IP Address Source\s*:\s*(.+)$", out, re.M); ip_src = m.group(1).strip() if m else ""
+        m = re.search(r"^IP Address\s*:\s*(.+)$", out, re.M); ip_addr = m.group(1).strip() if m else ""
+        m = re.search(r"MAC Address\s*:\s*(.+)$", out, re.M); mac = m.group(1).strip() if m else ""
+    ok, out, _ = run_cmd([ipmitool, "sdr", "type", "Power", "Supply"], timeout=12)
+    return {"present": True, "bmc_firmware": fw,
+            "lan": {"ip_source": ip_src, "ip_address": ip_addr, "mac": redact_value("mac", mac, redact)},
+            "psu_sdr": out if ok else ""}
+
+def psu_smbios(redact: bool) -> Dict[str, Any]:
+    ok, txt = dmidecode_type(["39"], timeout=25)
+    if not ok:
+        return {"present": False, "psus": [], "notes": "dmidecode type 39 unavailable"}
+    psus=[]
+    blocks = re.split(r"\nHandle\s+0x[0-9A-Fa-f]+,\s+DMI\s+type\s+39,\s+\d+\s+bytes\n", txt)
+    for b in blocks[1:]:
+        loc = parse_kv(b, "Location").strip()
+        mf = parse_kv(b, "Manufacturer").strip()
+        pn = (parse_kv(b, "Model Part Number") or parse_kv(b, "Part Number")).strip()
+        sn = parse_kv(b, "Serial Number").strip()
+        st = parse_kv(b, "Status").strip()
+        mp = parse_kv(b, "Max Power Capacity").strip()
+        if not (loc or mf or pn or sn or st):
+            continue
+        psus.append({"location": loc, "manufacturer": mf, "part_number": pn,
+                     "serial": redact_value("serial", sn, redact),
+                     "status": st, "max_power": mp})
+    return {"present": True, "psus": psus, "notes": ""}
+
+def command_versions() -> Dict[str, Any]:
+    tools = ["dmidecode","lspci","lsblk","nvme","ipmitool","nvidia-smi","lscpu","ip","ethtool"]
+    out={}
+    for t in tools:
+        p = which(t)
+        if not p:
+            out[t] = {"present": False, "path": "", "version_line": ""}
+            continue
+        if t == "nvidia-smi":
+            ok, txt, _ = run_cmd([p], timeout=10)
+            ver=""
+            if ok and txt:
+                m = re.search(r"NVIDIA-SMI version\s*:\s*(.+)$", txt, re.M)
+                ver = f"NVIDIA-SMI version  : {m.group(1).strip()}" if m else txt.splitlines()[0]
+            out[t] = {"present": True, "path": p, "version_line": ver}
+            continue
+        ok, txt, _ = run_cmd([p, "--version"], timeout=10)
+        out[t] = {"present": True, "path": p, "version_line": (txt.splitlines()[0].strip() if ok and txt else "")}
+    return out
+
+def md_table(rows):
+    s="| Item | Value |\n|---|---|\n"
+    for k,v in rows:
+        s += f"| {k} | {v} |\n"
+    return s
+
+def write_md(outdir: Path, data: Dict[str, Any], overwrite: bool) -> None:
+    p = outdir / "report.md"
+    if p.exists() and not overwrite:
+        raise SystemExit(f"report.md exists: {p} (use --overwrite)")
+    meta = data["metadata"]
+    red = meta["redaction"]
+    red_state = "ON (masked)" if red["serial"] else "OFF (full)"
+
+    sysinfo = data["system"]["system"]
+    bb = data["system"]["baseboard"]
+    bios = sysinfo.get("bios",{})
+    cpu = data.get("cpu",{})
+    mem = data.get("memory",{})
+    gpu = data.get("gpu",{})
+    ipmi = data.get("ipmi",{})
+    psu_dmi = data.get("power",{}).get("psu_dmi",{})
+    psus = psu_dmi.get("psus",[]) if isinstance(psu_dmi, dict) else []
+
+    gpu_models=[g.get("name","") for g in gpu.get("gpus",[]) if isinstance(g, dict)]
+    gpu_label = f"{len(gpu_models)}  " + ", ".join(sorted(set([m for m in gpu_models if m]))) if gpu_models else "N/A"
+    psu_model = "N/A"
+    if psus:
+        pn = psus[0].get("part_number","") or ""
+        mf = psus[0].get("manufacturer","") or ""
+        psu_model = (pn + (" / " + mf if mf else "")).strip() or "N/A"
+
+    sockets = str(cpu.get("sockets") or "")
+    total_cores = ""
+    total_threads = ""
+    try:
+        s = int(sockets) if sockets.isdigit() else 0
+        cps = int(str(cpu.get("cores_per_socket") or 0)) if str(cpu.get("cores_per_socket") or "").isdigit() else 0
+        tpc = int(str(cpu.get("threads_per_core") or 0)) if str(cpu.get("threads_per_core") or "").isdigit() else 0
+        if s and cps: total_cores = str(s*cps)
+        if total_cores and tpc: total_threads = str(int(total_cores)*tpc)
+    except Exception:
+        pass
+
+    warn = [
+        "> ⚠️ **共有前に必ず確認（安全のため）**",
+        "> - 本レポートは read-only 収集ですが、**機微情報（シリアル/UUID/MAC等）** が含まれ得ます。",
+        "> - 既定では識別子は **マスク** されています。`--include-serial` / `--redact-serial=off` でフル出力になります。",
+    ]
+    if not red["serial"]:
+        warn.append("> - ⚠️ **今回の実行は識別子マスクがOFF（フル出力）** です。共有前に必ず確認してください。")
+
+    summary = [
+        ("Hostname", f"`{meta['hostname']}`"),
+        ("Time", f"`{meta['time']}`"),
+        ("OS", meta.get("os_pretty","")),
+        ("Kernel", f"`{meta.get('kernel','')}`"),
+        ("Uptime", meta.get("uptime","")),
+        ("Redaction (serial/uuid/mac)", red_state),
+        ("Manufacturer / Product", f"{sysinfo.get('manufacturer','')} / {sysinfo.get('product_name','')}"),
+        ("Baseboard / Motherboard", f"{bb.get('manufacturer','')} / {bb.get('product_name','')}"),
+        ("System Serial", sysinfo.get("serial",{}).get("value","")),
+        ("Baseboard Serial", bb.get("serial",{}).get("value","")),
+        ("BIOS", f"{bios.get('version','')} ({bios.get('date','')})".strip()),
+        ("CPU", cpu.get("model","")),
+        ("CPU Sockets / Cores / Threads", f"{sockets} / {total_cores} / {total_threads}".strip()),
+        ("Memory Total", (f"{mem.get('total_gib','')} GiB" if mem.get("total_gib") else "")),
+        ("GPU", gpu_label),
+        ("BMC FW", ipmi.get("bmc_firmware","") if ipmi.get("present") else ""),
+        ("PSU", psu_model),
+    ]
+
+    out=[]
+    out.append(f"# Server-Gear Hardware BOM / Inventory Report (STK-009 v{VERSION})\n\n")
+    out.extend(warn)
+    out.append("\n\n## Summary\n\n")
+    out.append(md_table(summary))
+    p.write_text("".join(out), encoding="utf-8")
+
+def write_json(outdir: Path, data: Dict[str, Any], overwrite: bool) -> None:
+    p = outdir / "report.json"
+    if p.exists() and not overwrite:
+        raise SystemExit(f"report.json exists: {p} (use --overwrite)")
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def write_csv(outdir: Path, data: Dict[str, Any], overwrite: bool) -> None:
+    p = outdir / "report.csv"
+    if p.exists() and not overwrite:
+        raise SystemExit(f"report.csv exists: {p} (use --overwrite)")
+    meta = data.get("metadata",{})
+    sysinfo = data.get("system",{}).get("system",{})
+    bb = data.get("system",{}).get("baseboard",{})
+    cpu = data.get("cpu",{})
+    mem = data.get("memory",{})
+    g = data.get("gpu",{})
+    psu_dmi = data.get("power",{}).get("psu_dmi",{})
+    storage = data.get("storage",{})
+
+    gpu_models_str = ""
+    gpu_serials_str = ""
+    psu_models_str = ""
+    psu_serials_str = ""
+    nvme_models_str = ""
+    nvme_serials_str = ""
+
+    try:
+        gpus = g.get("gpus",[]) if isinstance(g, dict) else []
+        gpu_models_str = "; ".join([gg.get("name","") for gg in gpus if isinstance(gg, dict) and gg.get("name")])
+        serials=[]
+        for gg in gpus:
+            if not isinstance(gg, dict): continue
+            s = gg.get("serial")
+            if isinstance(s, dict): s = s.get("value")
+            if s: serials.append(str(s))
+        gpu_serials_str = "; ".join(serials)
+    except Exception:
+        pass
+
+    try:
+        psus = psu_dmi.get("psus",[]) if isinstance(psu_dmi, dict) else []
+        models=[]
+        serials=[]
+        for psu in psus:
+            if not isinstance(psu, dict): continue
+            pn = psu.get("part_number") or ""
+            mf = psu.get("manufacturer") or ""
+            if pn or mf:
+                models.append((pn + (" / " + mf if mf else "")).strip())
+            s = psu.get("serial")
+            if isinstance(s, dict): s = s.get("value")
+            if s: serials.append(str(s))
+        psu_models_str = "; ".join(models)
+        psu_serials_str = "; ".join(serials)
+    except Exception:
+        pass
+
+    try:
+        nv = storage.get("nvme",[]) if isinstance(storage, dict) else []
+        nvme_models_str = "; ".join([n.get("model","") for n in nv if isinstance(n, dict) and n.get("model")])
+        serials=[]
+        for n in nv:
+            if not isinstance(n, dict): continue
+            s = n.get("serial")
+            if isinstance(s, dict): s = s.get("value")
+            if s: serials.append(str(s))
+        nvme_serials_str = "; ".join(serials)
+    except Exception:
+        pass
+
+    sockets = cpu.get("sockets","")
+    total_cores=""
+    total_threads=""
+    try:
+        s = int(str(sockets)) if str(sockets).isdigit() else 0
+        cps = int(str(cpu.get("cores_per_socket") or 0)) if str(cpu.get("cores_per_socket") or "").isdigit() else 0
+        tpc = int(str(cpu.get("threads_per_core") or 0)) if str(cpu.get("threads_per_core") or "").isdigit() else 0
+        if s and cps: total_cores = str(s*cps)
+        if total_cores and tpc: total_threads = str(int(total_cores)*tpc)
+    except Exception:
+        pass
+
+    row = {
+        "hostname": meta.get("hostname",""),
+        "time": meta.get("time",""),
+        "os": meta.get("os_pretty",""),
+        "kernel": meta.get("kernel",""),
+        "manufacturer": sysinfo.get("manufacturer",""),
+        "product": sysinfo.get("product_name",""),
+        "system_serial": sysinfo.get("serial",{}).get("value",""),
+        "baseboard": bb.get("product_name",""),
+        "baseboard_serial": bb.get("serial",{}).get("value",""),
+        "cpu_model": cpu.get("model",""),
+        "cpu_sockets": sockets,
+        "cpu_cores": total_cores,
+        "cpu_threads": total_threads,
+        "memory_gib": mem.get("total_gib",""),
+        "gpu_models": gpu_models_str,
+        "gpu_serials": gpu_serials_str,
+        "psu_models": psu_models_str,
+        "psu_serials": psu_serials_str,
+        "nvme_models": nvme_models_str,
+        "nvme_serials": nvme_serials_str,
+        "redaction": "off" if not meta.get("redaction",{}).get("serial", True) else "on",
+    }
+
+    with p.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(row.keys()))
+        w.writeheader()
+        w.writerow(row)
+
+def main(argv: List[str]) -> int:
+    ap = argparse.ArgumentParser(prog=APP_NAME)
+    ap.add_argument("--out", default="", help="output directory (default: ./hw-inventory-<host>-<timestamp>)")
+    ap.add_argument("--overwrite", action="store_true", help="overwrite output files if exist")
+    ap.add_argument("--include-serial", action="store_true", help="disable redaction of serial-like identifiers (DANGEROUS)")
+    ap.add_argument("--redact-serial", choices=["on","off"], default="on", help="redact serial-like identifiers (default: on)")
+    args = ap.parse_args(argv)
+
+    redact = not (args.include_serial or args.redact_serial == "off")
+
+    outdir = Path(args.out) if args.out else Path(f"./hw-inventory-{host()}-{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    missing=[]
+    for t in ["dmidecode","lspci","lsblk","nvme","ipmitool","nvidia-smi","lscpu","ip","ethtool"]:
+        if not which(t):
+            missing.append(t)
+
+    meta = {
+        "app": APP_NAME,
+        "version": VERSION,
+        "hostname": host(),
+        "time": now_iso(),
+        "os_pretty": os_pretty(),
+        "kernel": platform.release(),
+        "uptime": uptime_pretty(),
+        "redaction": {"serial": redact, "uuid": redact, "mac": redact},
+    }
+
+    data = {
+        "metadata": meta,
+        "system": dmi_sysfs(redact=redact),
+        "cpu": cpu_info(),
+        "memory": mem_info(redact=redact),
+        "gpu": gpu_info(redact=redact),
+        "storage": storage_info(redact=redact),
+        "network": network_info(redact=redact),
+        "power": {"psu_dmi": psu_smbios(redact=redact)},
+        "ipmi": ipmi_info(redact=redact),
+        "missing_tools": sorted(set(missing)),
+        "notes": [],
+        "command_versions": command_versions(),
+    }
+
+    write_md(outdir, data, overwrite=args.overwrite)
+    write_json(outdir, data, overwrite=args.overwrite)
+    write_csv(outdir, data, overwrite=args.overwrite)
+
+    print(str(outdir))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
