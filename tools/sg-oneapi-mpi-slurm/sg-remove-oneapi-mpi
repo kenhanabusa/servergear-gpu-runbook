@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+STK_ID="STK-010"
+LOG_DIR="/var/log/sg-runbook"
+LOG_FILE="${LOG_DIR}/remove_oneapi_mpi_${STK_ID}_$(date +%Y%m%d_%H%M%S).log"
+
+ASSUME_YES=0
+DRY_RUN=0
+FORCE=0
+PURGE_ALL_ONEAPI=0
+
+log() {
+  local line="[$(date -Is)] $*"
+  echo "${line}" >&2
+  mkdir -p "${LOG_DIR}" 2>/dev/null || true
+  printf "%s\n" "${line}" >> "${LOG_FILE}" 2>/dev/null || true
+}
+run(){ if (( DRY_RUN )); then log "DRY-RUN: $*"; else log "RUN: $*"; eval "$@"; fi }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-remove-oneapi-mpi [--yes] [--dry-run] [--purge-all-oneapi] [--force]
+EOF
+}
+
+parse_args(){
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes) ASSUME_YES=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --purge-all-oneapi) PURGE_ALL_ONEAPI=1; shift ;;
+      --force) FORCE=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+  if [[ ! -t 0 && "${ASSUME_YES}" -ne 1 ]]; then die "非対話環境では --yes が必要です"; fi
+}
+
+require_root(){ [[ "${EUID}" -eq 0 ]] || die "rootで実行してください（sudo ...）"; }
+os_guard(){
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
+      if (( FORCE )); then log "WARN: unsupported OS (continuing due to --force)"
+      else die "未対応OS（--forceで解除）"
+      fi
+    fi
+  fi
+}
+
+main(){
+  parse_args "$@"
+  require_root
+  os_guard
+
+  log "=== ${STK_ID} remove start ==="
+  run "rm -f /etc/profile.d/sg-oneapi.sh"
+  run "DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge intel-hpckit intel-basekit || true"
+
+  if (( PURGE_ALL_ONEAPI )); then
+    log "purge-all-oneapi enabled"
+    run "dpkg -l | awk '/^ii  intel-oneapi-/{print $2}' | xargs -r DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge || true"
+  fi
+
+  run "rm -f /etc/apt/sources.list.d/oneAPI.list"
+  run "rm -f /usr/share/keyrings/oneapi-archive-keyring.gpg"
+  run "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge || true"
+  run "apt-get update -y || true"
+  log "=== ${STK_ID} remove done ==="
+}
+
+main "$@"

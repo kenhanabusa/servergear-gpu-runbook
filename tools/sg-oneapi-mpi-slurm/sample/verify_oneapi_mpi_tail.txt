@@ -1,0 +1,22 @@
+[2026-02-06T13:53:07+09:00] === STK-010 verify start ===
+[2026-02-06T13:53:07+09:00] Work dir: /opt/sg-demos/oneapi-mpi/verify_20260206_135307
+[2026-02-06T13:53:09+09:00] Detected PMI library: /lib/x86_64-linux-gnu/libpmi2.so.0
+[2026-02-06T13:53:09+09:00] Detected srun mpi opt: --mpi=pmi2
+[2026-02-06T13:53:09+09:00] Using MPICC wrapper: mpiicx
+[2026-02-06T13:53:09+09:00] Submitted impi_hello ntasks=1 jobid=6160
+[2026-02-06T13:53:11+09:00] Job 6160 state=COMPLETED Reason Reason
+[2026-02-06T13:53:11+09:00] Submitted himeno_mini ntasks=1 jobid=6161
+[2026-02-06T13:53:13+09:00] Job 6161 state=COMPLETED Reason Reason
+[2026-02-06T13:53:13+09:00] Himeno score (ntasks=1): score=4.085
+[2026-02-06T13:53:13+09:00] Submitted impi_hello ntasks=2 jobid=6162
+[2026-02-06T13:53:17+09:00] Job 6162 state=COMPLETED Reason Reason
+[2026-02-06T13:53:17+09:00] Submitted himeno_mini ntasks=2 jobid=6163
+[2026-02-06T13:53:20+09:00] Job 6163 state=COMPLETED Reason Reason
+[2026-02-06T13:53:20+09:00] Himeno score (ntasks=2): score=7.836
+[2026-02-06T13:53:20+09:00] Submitted impi_hello ntasks=4 jobid=6164
+[2026-02-06T13:53:23+09:00] Job 6164 state=COMPLETED Reason Reason
+[2026-02-06T13:53:23+09:00] Submitted himeno_mini ntasks=4 jobid=6165
+[2026-02-06T13:53:25+09:00] Job 6165 state=COMPLETED Reason Reason
+[2026-02-06T13:53:25+09:00] Himeno score (ntasks=4): score=13.487
+[2026-02-06T13:53:25+09:00] PASS: Intel MPI + Slurm sbatch end-to-end verified (ntasks=1/2/4)
+[2026-02-06T13:53:25+09:00] Cleaned workdir (use --keep-workdir to keep)

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+STK_ID="STK-010"
+LOG_DIR="/var/log/sg-runbook"
+LOG_FILE="${LOG_DIR}/install_oneapi_mpi_${STK_ID}_$(date +%Y%m%d_%H%M%S).log"
+
+ASSUME_YES=0
+DRY_RUN=0
+FORCE=0
+
+log() {
+  local line="[$(date -Is)] $*"
+  echo "${line}" >&2
+  mkdir -p "${LOG_DIR}" 2>/dev/null || true
+  printf "%s\n" "${line}" >> "${LOG_FILE}" 2>/dev/null || true
+}
+run() {
+  if (( DRY_RUN )); then log "DRY-RUN: $*"; else log "RUN: $*"; eval "$@"; fi
+}
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-install-oneapi-mpi [--yes] [--dry-run] [--force]
+
+- Ubuntu 24.04 固定（--forceで解除）
+- Intel oneAPI APT repo 設定 → intel-basekit + intel-hpckit 導入
+- Slurm連携のため libpmi2-0t64 を best-effort で導入
+- /etc/profile.d/sg-oneapi.sh を追加（setvars.sh を静かに読み込み）
+EOF
+}
+
+parse_args(){
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes) ASSUME_YES=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --force) FORCE=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+  if [[ ! -t 0 && "${ASSUME_YES}" -ne 1 ]]; then
+    die "非対話環境では --yes が必要です"
+  fi
+}
+
+require_root(){ [[ "${EUID}" -eq 0 ]] || die "rootで実行してください（sudo ...）"; }
+
+os_guard(){
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
+      if (( FORCE )); then
+        log "WARN: unsupported OS ID=${ID:-?} VERSION_ID=${VERSION_ID:-?} (continuing due to --force)"
+      else
+        die "未対応OS: ID=${ID:-?} VERSION_ID=${VERSION_ID:-?}（--forceで解除）"
+      fi
+    fi
+  else
+    die "/etc/os-release が読めません"
+  fi
+}
+
+main(){
+  parse_args "$@"
+  require_root
+  os_guard
+
+  log "=== ${STK_ID} install start ==="
+  run "apt-get update -y"
+  run "DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates wget gpg gpg-agent lsb-release"
+
+  # Intel oneAPI APT repo
+  run "wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null"
+  run "echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | tee /etc/apt/sources.list.d/oneAPI.list > /dev/null"
+  run "apt-get update -y"
+
+  run "DEBIAN_FRONTEND=noninteractive apt-get install -y intel-basekit intel-hpckit"
+
+  # PMI2 runtime (best effort)
+  run "DEBIAN_FRONTEND=noninteractive apt-get install -y libpmi2-0t64 || true"
+
+  if (( DRY_RUN )); then
+    log "DRY-RUN: write /etc/profile.d/sg-oneapi.sh"
+  else
+    cat > /etc/profile.d/sg-oneapi.sh <<'EOF'
+# Server-Gear: Intel oneAPI environment (quiet)
+if [ -r /opt/intel/oneapi/setvars.sh ]; then
+  . /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+fi
+EOF
+    chmod 0644 /etc/profile.d/sg-oneapi.sh || true
+  fi
+
+  log "=== ${STK_ID} install done ==="
+  log "Next: sg-verify-oneapi-mpi (recommended: WITHOUT sudo; see README)"
+}
+
+main "$@"

@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+STK_ID="STK-010"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="${LOG_DIR}/verify_oneapi_mpi_${STK_ID}_${TS}.log"
+
+SG_OUT_BASE="${SG_OUT_BASE:-/opt/sg-demos/oneapi-mpi}"
+SG_WORK_DIR="${SG_OUT_BASE}/verify_${TS}"
+KEEP_WORKDIR=0
+PARTITION="${PARTITION:-}"
+
+log() {
+  local line="[$(date -Is)] $*"
+  echo "${line}" >&2
+  mkdir -p "${LOG_DIR}" 2>/dev/null || true
+  printf "%s\n" "${line}" >> "${LOG_FILE}" 2>/dev/null || true
+}
+die(){ log "ERROR: $*"; exit 1; }
+skip(){ log "SKIP: $*"; exit 2; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sg-verify-oneapi-mpi [--keep-workdir] [--partition NAME]
+
+Exit codes:
+  0 PASS
+  1 FAIL
+  2 SKIP
+
+Recommended:
+  - Run WITHOUT sudo (jobs owned by user). See README for permissions.
+EOF
+}
+
+parse_args(){
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --keep-workdir) KEEP_WORKDIR=1; shift ;;
+      --partition) PARTITION="${2:-}"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+}
+
+need_cmd(){ command -v "$1" >/dev/null 2>&1; }
+
+check_writable(){
+  if ! (mkdir -p "${LOG_DIR}" 2>/dev/null && : >> "${LOG_FILE}" 2>/dev/null); then
+    skip "Cannot write logs to ${LOG_DIR}. Fix permissions (see README) or run with sudo."
+  fi
+  if ! mkdir -p "${SG_OUT_BASE}" 2>/dev/null; then
+    skip "Cannot create ${SG_OUT_BASE}. Fix permissions (see README) or run with sudo."
+  fi
+}
+
+source_oneapi(){
+  if [[ -r /opt/intel/oneapi/setvars.sh ]]; then
+    set +e; set +u
+    . /opt/intel/oneapi/setvars.sh >/dev/null 2>&1
+    local rc=$?
+    set -u; set -e
+    if (( rc != 0 )); then log "WARN: source oneAPI setvars.sh returned rc=${rc} (continuing)"; fi
+  fi
+}
+
+detect_pmi_lib(){
+  local p
+  p="$(ldconfig -p 2>/dev/null | awk '/libpmi2\.so/{print $NF; exit}')"
+  if [[ -n "${p}" && -r "${p}" ]]; then echo "${p}"; return 0; fi
+  p="$(ldconfig -p 2>/dev/null | awk '/libpmi\.so/{print $NF; exit}')"
+  if [[ -n "${p}" && -r "${p}" ]]; then echo "${p}"; return 0; fi
+  p="$(find /usr/lib/x86_64-linux-gnu /usr/lib /lib /lib64 /usr/lib64 -maxdepth 5 -type f \( -name 'libpmi2.so*' -o -name 'libpmi.so*' \) 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${p}" && -r "${p}" ]]; then echo "${p}"; return 0; fi
+  return 1
+}
+
+detect_srun_mpi_opt(){
+  local out
+  out="$(srun --mpi=list 2>/dev/null || true)"
+  if echo "${out}" | grep -qE 'pmi2'; then echo "--mpi=pmi2"; return 0; fi
+  if echo "${out}" | grep -qE 'pmix'; then echo "--mpi=pmix"; return 0; fi
+  echo ""
+}
+
+check_slurm_usable(){
+  if ! need_cmd sinfo; then
+    log "WARN: sinfo missing; cannot pre-check node availability"
+    return 0
+  fi
+  local ok
+  ok="$(sinfo -h -o '%T' 2>/dev/null | tr 'A-Z' 'a-z' | egrep -c 'idle|mix|alloc|comp' || true)"
+  if [[ "${ok}" == "0" ]]; then
+    skip "No usable nodes in sinfo (all down/drained/reserved). Fix node state or partition."
+  fi
+}
+
+write_sources(){
+  mkdir -p "${SG_WORK_DIR}"
+  cat > "${SG_WORK_DIR}/hello_mpi.c" <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+#include <unistd.h>
+int main(int argc, char** argv){
+  MPI_Init(&argc,&argv);
+  int rank=0,size=1;
+  char host[256]={0};
+  gethostname(host,sizeof(host)-1);
+  MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+  MPI_Comm_size(MPI_COMM_WORLD,&size);
+  printf("Hello from %s rank %d / %d\n", host, rank, size);
+  fflush(stdout);
+  MPI_Finalize();
+  return 0;
+}
+EOF
+  cat > "${SG_WORK_DIR}/himeno_mini_mpi.c" <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+static inline int idx(int x,int y,int z,int nx,int ny){ return (z*ny + y)*nx + x; }
+int main(int argc,char** argv){
+  MPI_Init(&argc,&argv);
+  int rank,size;
+  MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+  MPI_Comm_size(MPI_COMM_WORLD,&size);
+  const int NX=64, NY=64, NZ=64;
+  const int iters=50;
+  int z0 = (NZ*rank)/size;
+  int z1 = (NZ*(rank+1))/size;
+  int lz = z1 - z0;
+  int lz_h = lz + 2;
+  size_t n = (size_t)NX * (size_t)NY * (size_t)lz_h;
+  double *p = (double*)calloc(n, sizeof(double));
+  double *a = (double*)calloc(n, sizeof(double));
+  if(!p || !a){
+    if(rank==0) fprintf(stderr,"alloc failed\n");
+    MPI_Abort(MPI_COMM_WORLD, 2);
+  }
+  for(int z=0; z<lz_h; z++){
+    for(int y=0; y<NY; y++){
+      for(int x=0; x<NX; x++){
+        int i = idx(x,y,z,NX,NY);
+        p[i] = sin(0.001*(x + y + (z+z0)));
+      }
+    }
+  }
+  int up = (rank==0) ? MPI_PROC_NULL : rank-1;
+  int dn = (rank==size-1) ? MPI_PROC_NULL : rank+1;
+  double t0 = MPI_Wtime();
+  double local_err=0.0;
+  for(int it=0; it<iters; it++){
+    MPI_Sendrecv(&p[idx(0,0,1,NX,NY)], NX*NY, MPI_DOUBLE, up, 0,
+                 &p[idx(0,0,lz+1,NX,NY)], NX*NY, MPI_DOUBLE, dn, 0,
+                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(&p[idx(0,0,lz,NX,NY)], NX*NY, MPI_DOUBLE, dn, 1,
+                 &p[idx(0,0,0,NX,NY)], NX*NY, MPI_DOUBLE, up, 1,
+                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    local_err=0.0;
+    for(int z=1; z<=lz; z++){
+      for(int y=1; y<NY-1; y++){
+        for(int x=1; x<NX-1; x++){
+          int i = idx(x,y,z,NX,NY);
+          double nv = (p[idx(x-1,y,z,NX,NY)] + p[idx(x+1,y,z,NX,NY)]
+                     + p[idx(x,y-1,z,NX,NY)] + p[idx(x,y+1,z,NX,NY)]
+                     + p[idx(x,y,z-1,NX,NY)] + p[idx(x,y,z+1,NX,NY)]) / 6.0;
+          local_err += fabs(nv - p[i]);
+          a[i] = nv;
+        }
+      }
+    }
+    for(int z=1; z<=lz; z++){
+      for(int y=1; y<NY-1; y++){
+        for(int x=1; x<NX-1; x++){
+          int i = idx(x,y,z,NX,NY);
+          p[i] = a[i];
+        }
+      }
+    }
+  }
+  double t1 = MPI_Wtime();
+  double err=0.0, time=0.0;
+  MPI_Reduce(&local_err, &err, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  double local_time = t1 - t0;
+  MPI_Reduce(&local_time, &time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  if(rank==0){
+    double cells = (double)(NX-2)*(NY-2)*(NZ-2);
+    double ops_per_cell = 8.0;
+    double gflops = (cells * (double)iters * ops_per_cell) / (time * 1e9);
+    printf("HIMENO_MINI iters=%d NX=%d NY=%d NZ=%d time=%.6f s err=%.6e score=%.3f GFLOPS\n",
+           iters, NX, NY, NZ, time, err, gflops);
+  }
+  free(p); free(a);
+  MPI_Finalize();
+  return 0;
+}
+EOF
+}
+
+compile_bins(){
+  local mpicc=""
+  if command -v mpiicx >/dev/null 2>&1; then mpicc="mpiicx"
+  elif command -v mpiicc >/dev/null 2>&1; then mpicc="mpiicc"
+  elif command -v mpicc >/dev/null 2>&1; then mpicc="mpicc"
+  else die "MPI C compiler wrapper not found (mpiicx/mpiicc/mpicc)"
+  fi
+  log "Using MPICC wrapper: ${mpicc}"
+  (cd "${SG_WORK_DIR}" && "${mpicc}" -O2 hello_mpi.c -o hello_mpi)
+  (cd "${SG_WORK_DIR}" && "${mpicc}" -O3 -march=native himeno_mini_mpi.c -lm -o himeno_mini_mpi)
+}
+
+submit_and_wait(){
+  local ntasks="$1" jobname="$2" exe="$3" pmi_lib="$4" srun_mpi_opt="$5"
+  local out="${LOG_DIR}/${jobname}_ntasks${ntasks}_${TS}.out"
+  local err="${LOG_DIR}/${jobname}_ntasks${ntasks}_${TS}.err"
+  local job="${SG_WORK_DIR}/${jobname}_ntasks${ntasks}.sbatch"
+
+  {
+    echo "#!/usr/bin/env bash"
+    [[ -n "${PARTITION}" ]] && echo "#SBATCH -p ${PARTITION}"
+    echo "#SBATCH -J ${jobname}_${ntasks}"
+    echo "#SBATCH --ntasks=${ntasks}"
+    echo "#SBATCH --cpus-per-task=1"
+    echo "#SBATCH --time=00:05:00"
+    echo "#SBATCH --output=${out}"
+    echo "#SBATCH --error=${err}"
+    echo
+    echo "set -euo pipefail"
+    echo "source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true"
+    echo "export I_MPI_PMI_LIBRARY=\"${pmi_lib}\""
+    echo "export I_MPI_DEBUG=5"
+    echo "echo \"[INFO] I_MPI_PMI_LIBRARY=\$I_MPI_PMI_LIBRARY\""
+    echo "echo \"[INFO] srun mpi opt: ${srun_mpi_opt}\""
+    echo "srun ${srun_mpi_opt} -n ${ntasks} \"${exe}\""
+  } > "${job}"
+  chmod +x "${job}" || true
+
+  local jid
+  jid="$(sbatch --parsable "${job}")" || die "sbatch failed"
+  log "Submitted ${jobname} ntasks=${ntasks} jobid=${jid}"
+
+  while true; do
+    if squeue -h -j "${jid}" 2>/dev/null | grep -q .; then sleep 1; continue; fi
+    break
+  done
+
+  local state=""
+  if command -v sacct >/dev/null 2>&1; then
+    state="$(sacct -j "${jid}" --format=State --noheader -P 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+  fi
+  if [[ -z "${state}" ]]; then
+    state="$(scontrol show job "${jid}" 2>/dev/null | awk -F= '/JobState=/{print $2; exit}' || true)"
+  fi
+  log "Job ${jid} state=${state:-unknown} Reason"
+  [[ -s "${out}" ]] || die "Missing stdout: ${out}"
+}
+
+main(){
+  parse_args "$@"
+  check_writable
+
+  log "=== ${STK_ID} verify start ==="
+  log "Work dir: ${SG_WORK_DIR}"
+  mkdir -p "${SG_WORK_DIR}"
+
+  need_cmd sbatch || skip "Slurm not installed (sbatch missing)"
+  need_cmd srun   || skip "Slurm not installed (srun missing)"
+  check_slurm_usable
+
+  [[ -r /opt/intel/oneapi/setvars.sh ]] || skip "oneAPI not installed (/opt/intel/oneapi/setvars.sh missing)"
+  source_oneapi
+  command -v icx >/dev/null 2>&1 || skip "icx not found (install intel-hpckit)"
+  command -v ifx >/dev/null 2>&1 || skip "ifx not found (install intel-hpckit)"
+  [[ -d /opt/intel/oneapi/mpi/latest ]] || skip "Intel MPI not found (/opt/intel/oneapi/mpi/latest missing)"
+
+  local pmi_lib=""
+  pmi_lib="$(detect_pmi_lib || true)"
+  [[ -n "${pmi_lib}" ]] || skip "Could not find Slurm PMI library (libpmi2.so/libpmi.so). Try: sudo apt install libpmi2-0t64"
+  log "Detected PMI library: ${pmi_lib}"
+
+  local srun_mpi_opt=""
+  srun_mpi_opt="$(detect_srun_mpi_opt)"
+  log "Detected srun mpi opt: ${srun_mpi_opt:-<none>}"
+
+  write_sources
+  compile_bins
+
+  for n in 1 2 4; do
+    submit_and_wait "${n}" "impi_hello" "${SG_WORK_DIR}/hello_mpi" "${pmi_lib}" "${srun_mpi_opt}"
+    submit_and_wait "${n}" "himeno_mini" "${SG_WORK_DIR}/himeno_mini_mpi" "${pmi_lib}" "${srun_mpi_opt}"
+
+    local out1="${LOG_DIR}/impi_hello_ntasks${n}_${TS}.out"
+    grep -q "Hello from" "${out1}" || die "Hello output validation failed: ${out1}"
+
+    local out2="${LOG_DIR}/himeno_mini_ntasks${n}_${TS}.out"
+    grep -q "HIMENO_MINI" "${out2}" || die "Himeno output validation failed: ${out2}"
+    local score
+    score="$(grep "HIMENO_MINI" "${out2}" | awk '{for(i=1;i<=NF;i++){if($i ~ /^score=/){print $i}}}' | head -n1 || true)"
+    log "Himeno score (ntasks=${n}): ${score:-N/A}"
+  done
+
+  log "PASS: Intel MPI + Slurm sbatch end-to-end verified (ntasks=1/2/4)"
+  if (( KEEP_WORKDIR == 0 )); then
+    rm -rf "${SG_WORK_DIR}" || true
+    log "Cleaned workdir (use --keep-workdir to keep)"
+  else
+    log "Kept workdir: ${SG_WORK_DIR}"
+  fi
+}
+
+main "$@"
