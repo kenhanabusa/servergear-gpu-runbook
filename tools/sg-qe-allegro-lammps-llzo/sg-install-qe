@@ -1,15 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# normalized return codes
-RC_OK=0
-RC_SKIP=20
-RC_FAIL=40
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$DIR/bin/sg_runbook_lib.sh"
-sg_begin "QE_INSTALL"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/install_qe_STK-011_${TS}.log"
 
-sg_init_logs
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
 
-STEP="QE-INSTALL-010"
-sg_skip "v0.1: installer is not implemented here. Use your existing QE install runbook." "$STEP" "E_QE_NOT_INSTALLED" "sg-install-qe"
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-install-qe [--method apt|url] [--yes]
+
+v0.1:
+- まずはQEが存在する状態を作る（CPU版でもOK）
+- GPU版/コンテナ/ソースビルドは v0.2 以降
+
+ENV (method=url):
+- SG_QE_URL : QEバンドルURL（zip）を指定して /opt/sg/qe に展開
+EOF
+}
+
+METHOD="apt"
+YES=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --method) METHOD="${2:-}"; shift 2 ;;
+    --yes) YES=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+mkdir -p /opt/sg 2>/dev/null || true
+
+log "BEGIN install-qe method=${METHOD}"
+
+if [[ "$METHOD" == "apt" ]]; then
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y quantum-espresso
+  log "OK: quantum-espresso installed via apt"
+  exit 0
+fi
+
+if [[ "$METHOD" == "url" ]]; then
+  [[ -n "${SG_QE_URL:-}" ]] || die "SG_QE_URL is required for --method url"
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip
+  mkdir -p /opt/sg/qe
+  log "Fetching: ${SG_QE_URL}"
+  curl -fsSL "$SG_QE_URL" -o /opt/sg/qe/qe.zip
+  unzip -o /opt/sg/qe/qe.zip -d /opt/sg/qe/
+  log "OK: extracted to /opt/sg/qe (ensure pw.x is in PATH)"
+  exit 0
+fi
+
+die "unknown method: $METHOD"

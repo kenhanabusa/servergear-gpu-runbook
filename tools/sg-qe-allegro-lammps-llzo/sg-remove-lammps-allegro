@@ -1,14 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# normalized return codes
-RC_OK=0
-RC_SKIP=20
-RC_FAIL=40
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$DIR/bin/sg_runbook_lib.sh"
-sg_begin "LMP_REMOVE"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/remove_lammps_allegro_STK-011_${TS}.log"
 
-sg_init_logs
-STEP="LMP-REMOVE-190"
-sg_skip "v0.1: remover is not implemented here." "$STEP" "E_NOT_IMPLEMENTED" "sg-remove-lammps-allegro"
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-remove-lammps-allegro [--purge-apt]
+
+Default:
+- /opt/sg/lammps-allegro を削除（method=url の残骸）
+
+Option:
+- --purge-apt を付けると apt の lammps も purge（必要時のみ）
+EOF
+}
+
+PURGE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --purge-apt) PURGE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+log "BEGIN remove-lammps-allegro purge_apt=${PURGE}"
+
+rm -rf /opt/sg/lammps-allegro 2>/dev/null || true
+if (( PURGE )); then
+  apt-get remove -y --purge lammps || true
+  apt-get autoremove -y --purge || true
+fi
+log "OK"

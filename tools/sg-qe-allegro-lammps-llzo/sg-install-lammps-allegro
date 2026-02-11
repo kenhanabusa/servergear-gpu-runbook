@@ -1,14 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# normalized return codes
-RC_OK=0
-RC_SKIP=20
-RC_FAIL=40
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$DIR/bin/sg_runbook_lib.sh"
-sg_begin "LMP_INSTALL"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/install_lammps_allegro_STK-011_${TS}.log"
 
-sg_init_logs
-STEP="LMP-INSTALL-110"
-sg_skip "v0.1: installer is not implemented here. Use your existing LAMMPS/Allegro install runbook." "$STEP" "E_LMP_NOT_INSTALLED" "sg-install-lammps-allegro"
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-install-lammps-allegro [--method apt|url]
+
+v0.1:
+- まずはLAMMPSが存在する状態を作る（apt版はAllegroが入らない可能性あり）
+- Allegro対応LAMMPSは method=url（配布URL）で後から確定する
+
+ENV (method=url):
+- SG_LMP_ALLEGRO_URL : Allegro対応LAMMPSバンドルURL（zip）→ /opt/sg/lammps-allegro に展開
+EOF
+}
+
+METHOD="url"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --method) METHOD="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+mkdir -p /opt/sg 2>/dev/null || true
+
+log "BEGIN install-lammps-allegro method=${METHOD}"
+
+if [[ "$METHOD" == "apt" ]]; then
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y lammps
+  log "OK: lammps installed via apt (allegro pair style may be missing)"
+  exit 0
+fi
+
+if [[ "$METHOD" == "url" ]]; then
+  [[ -n "${SG_LMP_ALLEGRO_URL:-}" ]] || die "SG_LMP_ALLEGRO_URL is required for --method url"
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip
+  mkdir -p /opt/sg/lammps-allegro
+  log "Fetching: ${SG_LMP_ALLEGRO_URL}"
+  curl -fsSL "$SG_LMP_ALLEGRO_URL" -o /opt/sg/lammps-allegro/lmp.zip
+  unzip -o /opt/sg/lammps-allegro/lmp.zip -d /opt/sg/lammps-allegro/
+  log "OK: extracted to /opt/sg/lammps-allegro (ensure lmp is in PATH)"
+  exit 0
+fi
+
+die "unknown method: $METHOD"
