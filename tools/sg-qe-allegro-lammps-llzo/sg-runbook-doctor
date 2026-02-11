@@ -1,59 +1,147 @@
 #!/usr/bin/env bash
 set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
 
-RID="$(python3 - <<'PY'
-import json
-m=json.load(open("tools/sg-qe-allegro-lammps-llzo/manifest.json","r",encoding="utf-8"))
-print(m.get("id","STK-011"))
+RID="${RID:-STK-011}"
+PRIMARY="${PRIMARY:-/var/log/sg-runbook}"
+FALLBACK="${FALLBACK:-$HOME/sg-runbook-log}"
+RECENT="${RECENT:-20}"
+
+echo "[doctor] rid=${RID}"
+echo "[doctor] primary=${PRIMARY}"
+echo "[doctor] fallback=${FALLBACK}"
+
+# Pick "best" failure across recent JSONL files.
+# Policy (v0.1):
+# - Look at recent JSONL files in primary+fallback
+# - From all FAIL records, prefer later-stage steps:
+#   LMP_VERIFY > QE_VERIFY (and others)
+# - Within same priority, pick the most recent failure
+
+eval "$(
+python3 - <<'PY'
+import os, json, glob, shlex
+from pathlib import Path
+
+RID = os.environ.get("RID","STK-011")
+PRIMARY = Path(os.environ.get("PRIMARY","/var/log/sg-runbook"))
+FALLBACK = Path(os.environ.get("FALLBACK", str(Path.home()/"sg-runbook-log")))
+RECENT = int(os.environ.get("RECENT","20"))
+
+# Step priority (bigger is more important)
+PRIO = {
+  "LMP_VERIFY": 30,
+  "ALLEGRO_VERIFY": 25,
+  "QE_VERIFY": 10,
+  "FETCH": 0,
+}
+
+OK_WORDS = {"ok","pass","success"}
+
+def is_fail(r: dict) -> bool:
+    # Treat as fail if err exists OR status/rc indicates failure
+    err = (r.get("err") or "").strip()
+    if err:
+        return True
+    st = r.get("status")
+    if isinstance(st, str) and st.lower() in OK_WORDS:
+        return False
+    rc = r.get("rc")
+    if isinstance(rc, int):
+        return rc != 0
+    if isinstance(rc, str) and rc.isdigit():
+        return int(rc) != 0
+    # If neither ok nor explicit err, assume not-fail
+    return False
+
+def candidates(dirpath: Path):
+    if not dirpath.exists():
+        return []
+    files = sorted(dirpath.glob(f"{RID}_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[:RECENT]
+
+files = candidates(PRIMARY) + candidates(FALLBACK)
+files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+best = None
+best_pr = None
+best_mtime = None
+
+for p in files:
+    try:
+        lines = p.read_text(errors="ignore").splitlines()
+    except Exception:
+        continue
+    # scan all lines, collect failures; keep the best by (prio, mtime)
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(r, dict):
+            continue
+        if not is_fail(r):
+            continue
+        step = (r.get("step") or "").strip()
+        pr = PRIO.get(step, 5)  # unknown steps get small prio
+        mtime = p.stat().st_mtime
+        if (best is None) or (pr > best_pr) or (pr == best_pr and mtime > best_mtime):
+            best = (p, r)
+            best_pr = pr
+            best_mtime = mtime
+
+if best is None:
+    # fallback: pick latest file and last line
+    chosen = files[0] if files else None
+    r = {}
+    if chosen:
+        try:
+            lines = chosen.read_text(errors="ignore").splitlines()
+            for ln in reversed(lines):
+                try:
+                    r = json.loads(ln)
+                    if isinstance(r, dict): break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    out = {
+        "latest_jsonl": str(chosen) if chosen else "",
+        "err": (r.get("err") or ""),
+        "step": (r.get("step") or ""),
+        "hint": (r.get("hint") or ""),
+    }
+else:
+    chosen, r = best
+    out = {
+        "latest_jsonl": str(chosen),
+        "err": (r.get("err") or ""),
+        "step": (r.get("step") or ""),
+        "hint": (r.get("hint") or ""),
+    }
+
+def sh_assign(k,v):
+    return f'{k}={shlex.quote(v)}'
+
+print(sh_assign("LATEST_JSONL", out["latest_jsonl"]))
+print(sh_assign("ERR", out["err"]))
+print(sh_assign("STEP", out["step"]))
+print(sh_assign("HINT", out["hint"]))
 PY
 )"
 
-PRIMARY="$(python3 - <<'PY'
-import json
-m=json.load(open("tools/sg-qe-allegro-lammps-llzo/manifest.json","r",encoding="utf-8"))
-print(m.get("log_dir","/var/log/sg-runbook"))
-PY
-)"
-FALLBACK="$HOME/sg-runbook-log"
+echo "[doctor] latest_jsonl=${LATEST_JSONL:-}"
 
-pick_latest() { ls -1t "$1"/"${RID}"_*.jsonl 2>/dev/null | head -n 1 || true; }
+err="${ERR:-}"
+step="${STEP:-}"
+hint="${HINT:-}"
 
-latest_jsonl="$(pick_latest "$PRIMARY")"
-if [ -z "$latest_jsonl" ]; then latest_jsonl="$(pick_latest "$FALLBACK")"; fi
-
-echo "[doctor] rid=$RID"
-echo "[doctor] primary=$PRIMARY"
-echo "[doctor] fallback=$FALLBACK"
-echo "[doctor] latest_jsonl=$latest_jsonl"
-
-err="-" ; step="UNKNOWN" ; hint="no logs found"
-if [ -n "$latest_jsonl" ] && [ -s "$latest_jsonl" ]; then
-  read -r err step hint < <(python3 - "$latest_jsonl" <<'PY'
-import json, sys
-path=sys.argv[1]
-last=None
-for line in open(path,"r",encoding="utf-8",errors="ignore"):
-  line=line.strip()
-  if not line: 
-    continue
-  try:
-    obj=json.loads(line)
-  except Exception:
-    continue
-  if obj.get("type")=="result":
-    last=obj
-if not last:
-  print("- UNKNOWN no_result"); sys.exit(0)
-print(last.get("err","-"), last.get("step","UNKNOWN"), (last.get("hint","") or "").replace("\n"," ")[:300])
-PY
-)
-fi
-
-echo "err=$err"
-echo "step=$step"
-echo "hint=$hint"
-
+echo "err=${err}"
+echo "step=${step}"
+echo "hint=${hint}"
 echo "next_cmds:"
+
 case "$err" in
   E_LMP_SAMPLE_MISSING)
     echo "  - tools/sg-qe-allegro-lammps-llzo/sg-fetch-sample-lammps"
@@ -64,7 +152,7 @@ case "$err" in
     echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-qe"
     ;;
   E_MODEL_MISSING)
-  - tools/sg-qe-allegro-lammps-llzo/sg-fetch-model  # set SG_MODEL_URL / optional auth
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-fetch-model  # set SG_MODEL_URL / optional auth"
     echo "  - (place model.nequip.pth or change MODEL path in input)"
     echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-lammps-allegro"
     ;;
