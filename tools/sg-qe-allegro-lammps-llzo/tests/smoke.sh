@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# normalized return codes
+RC_OK=0
+RC_SKIP=20
+RC_FAIL=40
+
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "== smoke: QE verify should FAIL with pseudo_dir missing =="

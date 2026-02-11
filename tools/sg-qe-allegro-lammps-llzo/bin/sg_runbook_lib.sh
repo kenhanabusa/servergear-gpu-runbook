@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# normalized return codes
+RC_OK=0
+RC_SKIP=20
+RC_FAIL=40
+
 SG_LOG_DIR="${SG_LOG_DIR:-/var/log/sg-runbook}"
 SG_TASK="${SG_TASK:-STK-011}"
 SG_TS="${SG_TS:-$(date +%Y%m%d_%H%M%S)}"
