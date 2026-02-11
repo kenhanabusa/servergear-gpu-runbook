@@ -66,7 +66,7 @@ sg__classify_from_txt() {
     echo "E_PSEUDO_DIR_MISSING|Set pseudo_dir to actual UPF path."
     return 0
   fi
-  if echo "$tail" | grep -qi "LAMMPS sample input/data missing"; then
+  if echo "$tail" | grep -qiE "LAMMPS sample input/data missing|E_INPUT_NOT_FOUND"; then
     echo "E_LMP_SAMPLE_MISSING|Place sample input+data (and model) or point to published zip; then re-run verify."
     return 0
   fi

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="$BASE_DIR/sample"
+URL="https://notes.server-gear.com/assets/downloads/lammps_allegro_llzo_50k_inputs_20260211.zip"
+
+mkdir -p "$SAMPLE_DIR"
+tmp="$(mktemp)"
+echo "[fetch] $URL"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$URL" -o "$tmp"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$tmp" "$URL"
+else
+  echo "ERROR: need curl or wget" >&2
+  exit 40
+fi
+
+if command -v unzip >/dev/null 2>&1; then
+  unzip -oq "$tmp" -d "$SAMPLE_DIR/.tmp_lmp"
+else
+  echo "ERROR: need unzip" >&2
+  exit 40
+fi
+
+inner="$(find "$SAMPLE_DIR/.tmp_lmp" -maxdepth 3 -type f -name 'in.bench1_throughput' -print -quit | sed 's#/in.bench1_throughput##')"
+if [ -z "${inner:-}" ]; then
+  echo "ERROR: unexpected zip layout" >&2
+  exit 40
+fi
+
+cp -a "$inner"/in.bench1_throughput "$SAMPLE_DIR/in.bench1_throughput"
+cp -a "$inner"/llzo_51840.data "$SAMPLE_DIR/llzo_51840.data"
+echo "OK: placed LAMMPS sample into $SAMPLE_DIR"
+rm -rf "$SAMPLE_DIR/.tmp_lmp" "$tmp"

@@ -1,11 +1,14 @@
 # Bench1 (Throughput mode): LLZO bulk (51840 atoms) + Allegro(LAMMPS)
+# 目的: 「爆発しない」状態で、Allegro推論コストを毎step回して ns/day を確実に取る
+# 注: 力をゼロに上書きして座標固定する（物理MDではなく“推論スループット測定”）
+
 units metal
 atom_style atomic
 boundary p p p
 
 variable DATA   string llzo_51840.data
 variable MODEL  string model.nequip.pth
-variable DT     equal 0.001
+variable DT     equal 0.001     # ps (=1fs)
 variable WARMUP equal 2000
 variable NSTEPS equal 20000
 variable THERMO equal 1000
@@ -16,10 +19,12 @@ pair_style      allegro
 pair_coeff      * * ${MODEL} Li La Zr O
 
 neighbor        2.0 bin
+# ★ check no で毎step neighbor build（保守的な測定）
 neigh_modify    every 1 delay 0 check no
 
 timestep        ${DT}
 
+# ★ 座標を固定（速度もゼロに）
 velocity        all set 0.0 0.0 0.0
 fix             INT all nve
 fix             HOLD all setforce 0.0 0.0 0.0

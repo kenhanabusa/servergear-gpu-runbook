@@ -16,23 +16,19 @@ PY
 )"
 FALLBACK="$HOME/sg-runbook-log"
 
-pick_latest() {
-  local d="$1"
-  ls -1t "$d"/"${RID}"_*.jsonl 2>/dev/null | head -n 1 || true
-}
+pick_latest() { ls -1t "$1"/"${RID}"_*.jsonl 2>/dev/null | head -n 1 || true; }
 
 latest_jsonl="$(pick_latest "$PRIMARY")"
-if [ -z "$latest_jsonl" ]; then
-  latest_jsonl="$(pick_latest "$FALLBACK")"
-fi
+if [ -z "$latest_jsonl" ]; then latest_jsonl="$(pick_latest "$FALLBACK")"; fi
 
 echo "[doctor] rid=$RID"
 echo "[doctor] primary=$PRIMARY"
 echo "[doctor] fallback=$FALLBACK"
 echo "[doctor] latest_jsonl=$latest_jsonl"
 
+err="-" ; step="UNKNOWN" ; hint="no logs found"
 if [ -n "$latest_jsonl" ] && [ -s "$latest_jsonl" ]; then
-  python3 - "$latest_jsonl" <<'PY'
+  read -r err step hint < <(python3 - "$latest_jsonl" <<'PY'
 import json, sys
 path=sys.argv[1]
 last=None
@@ -47,15 +43,39 @@ for line in open(path,"r",encoding="utf-8",errors="ignore"):
   if obj.get("type")=="result":
     last=obj
 if not last:
-  print("err=-"); print("step=UNKNOWN"); print("hint=no result record found")
-  sys.exit(0)
-print(f"err={last.get('err','-')}")
-print(f"step={last.get('step','UNKNOWN')}")
-print(f"hint={last.get('hint','')}")
+  print("- UNKNOWN no_result"); sys.exit(0)
+print(last.get("err","-"), last.get("step","UNKNOWN"), (last.get("hint","") or "").replace("\n"," ")[:300])
 PY
-  exit 0
+)
 fi
 
-echo "err=-"
-echo "step=UNKNOWN"
-echo "hint=no logs found"
+echo "err=$err"
+echo "step=$step"
+echo "hint=$hint"
+
+echo "next_cmds:"
+case "$err" in
+  E_LMP_SAMPLE_MISSING)
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-fetch-sample-lammps"
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-lammps-allegro"
+    ;;
+  E_PSEUDO_DIR_MISSING)
+    echo "  - (set pseudo_dir in input to your UPF path) 例: pseudo_dir='/path/to/pseudos'"
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-qe"
+    ;;
+  E_MODEL_MISSING)
+    echo "  - (place model.nequip.pth or change MODEL path in input)"
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-lammps-allegro"
+    ;;
+  E_QE_NOT_INSTALLED)
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-install-qe"
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-qe"
+    ;;
+  E_LMP_NOT_INSTALLED)
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-install-lammps-allegro"
+    echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-lammps-allegro"
+    ;;
+  *)
+    echo "  - (no suggestion)"
+    ;;
+esac
