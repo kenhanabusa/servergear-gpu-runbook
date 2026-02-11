@@ -7,6 +7,8 @@ RC_FAIL=40
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/bin/sg_runbook_lib.sh"
+sg_begin "LMP_INSTALL"
+
 sg_init_logs
 STEP="LMP-INSTALL-110"
 sg_skip "v0.1: installer is not implemented here. Use your existing LAMMPS/Allegro install runbook." "$STEP" "E_LMP_NOT_INSTALLED" "sg-install-lammps-allegro"

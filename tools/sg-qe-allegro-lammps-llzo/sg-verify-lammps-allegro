@@ -7,6 +7,8 @@ RC_FAIL=40
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/bin/sg_runbook_lib.sh"
+sg_begin "LMP_VERIFY"
+
 sg_init_logs
 
 STEP="LMP-VERIFY-140"

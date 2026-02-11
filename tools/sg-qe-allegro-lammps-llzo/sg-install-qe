@@ -7,6 +7,8 @@ RC_FAIL=40
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/bin/sg_runbook_lib.sh"
+sg_begin "QE_INSTALL"
+
 sg_init_logs
 
 STEP="QE-INSTALL-010"

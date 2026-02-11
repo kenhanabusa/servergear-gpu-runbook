@@ -29,3 +29,9 @@ echo "== doctor classify =="
 
 echo
 echo "DONE"
+
+echo
+echo "== doctor classify (should NOT be UNKNOWN) =="
+OUT="$(tools/sg-qe-allegro-lammps-llzo/sg-runbook-doctor || true)"
+echo "$OUT"
+echo "$OUT" | grep -q "step=UNKNOWN" && { echo "doctor: step UNKNOWN (NG)"; exit 1; } || echo "doctor: structured OK"
