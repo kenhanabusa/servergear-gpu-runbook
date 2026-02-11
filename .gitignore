@@ -21,3 +21,7 @@ __pycache__/
 *token*
 *apikey*
 *secret*
+
+# STK-011: fetched samples (do not commit)
+tools/sg-qe-allegro-lammps-llzo/sample/llzo_51840.data
+tools/sg-qe-allegro-lammps-llzo/sample/model.nequip.pth

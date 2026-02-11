@@ -16,7 +16,9 @@ set -e
 echo "rc=$rc (expect 40 fail) OK"
 
 echo
-echo "== smoke: LAMMPS verify should FAIL with model missing (expected) =="
+echo "== smoke: fetch sample then LAMMPS verify should FAIL with model missing (expected) ==
+bash tools/sg-qe-allegro-lammps-llzo/sg-fetch-sample-lammps || true
+"
 set +e
 "$DIR/sg-verify-lammps-allegro" "$DIR/sample" "$DIR/sample/in.bench1_throughput" "$DIR/sample/llzo_51840.data" "$DIR/sample/model.nequip.pth"
 rc=$?
