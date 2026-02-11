@@ -64,6 +64,7 @@ case "$err" in
     echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-qe"
     ;;
   E_MODEL_MISSING)
+  - tools/sg-qe-allegro-lammps-llzo/sg-fetch-model  # set SG_MODEL_URL / optional auth
     echo "  - (place model.nequip.pth or change MODEL path in input)"
     echo "  - tools/sg-qe-allegro-lammps-llzo/sg-verify-lammps-allegro"
     ;;

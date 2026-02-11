@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RC_OK=0 RC_SKIP=20 RC_FAIL=40
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_begin MODEL_FETCH
+sg_init_logs
+
+STEP="MODEL-FETCH-110"
+
+# Defaults
+DST="${SG_MODEL_DST:-$DIR/sample/model.nequip.pth}"
+URL="${SG_MODEL_URL:-}"
+SHA="${SG_MODEL_SHA256:-}"
+
+# Auth options (optional)
+# - basic: SG_MODEL_BASIC="user:pass"
+# - bearer: SG_MODEL_BEARER="token"
+BASIC="${SG_MODEL_BASIC:-}"
+BEARER="${SG_MODEL_BEARER:-}"
+
+if [ -f "$DST" ]; then
+  sg_log "OK: model already exists: $DST"
+  exit $RC_OK
+fi
+
+if [ -z "$URL" ]; then
+  sg_fail "MODEL URL missing: set SG_MODEL_URL (private URL / signed URL / internal mirror)" "$STEP" "E_MODEL_URL_MISSING" "DST=$DST"
+  exit $RC_FAIL
+fi
+
+mkdir -p "$(dirname "$DST")"
+tmp="$(mktemp)"
+
+sg_log "fetch url=$URL"
+if command -v curl >/dev/null 2>&1; then
+  args=(-fsSL -o "$tmp" "$URL")
+  if [ -n "$BASIC" ]; then args=(-u "$BASIC" "${args[@]}"); fi
+  if [ -n "$BEARER" ]; then args=(-H "Authorization: Bearer $BEARER" "${args[@]}"); fi
+  if ! curl "${args[@]}"; then
+    rm -f "$tmp" || true
+    sg_fail "MODEL fetch failed (curl): check URL/auth" "$STEP" "E_MODEL_FETCH_FAILED" "URL=$URL"
+    exit $RC_FAIL
+  fi
+else
+  rm -f "$tmp" || true
+  sg_fail "curl not found" "$STEP" "E_MODEL_FETCH_FAILED" "need=curl"
+  exit $RC_FAIL
+fi
+
+# checksum (optional)
+if [ -n "$SHA" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "$SHA  $tmp" | sha256sum -c - >/dev/null 2>&1 || {
+      rm -f "$tmp" || true
+      sg_fail "SHA256 mismatch" "$STEP" "E_MODEL_SHA256_MISMATCH" "DST=$DST"
+      exit $RC_FAIL
+    }
+  else
+    sg_log "WARN: sha256sum not found; skipping SHA check"
+  fi
+fi
+
+mv -f "$tmp" "$DST"
+chmod 0644 "$DST" || true
+sg_log "OK: model placed: $DST"
+exit $RC_OK

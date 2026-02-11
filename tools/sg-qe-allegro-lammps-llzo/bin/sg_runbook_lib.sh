@@ -11,11 +11,32 @@ SG_TASK="${SG_TASK:-STK-011}"
 SG_TS="${SG_TS:-$(date +%Y%m%d_%H%M%S)}"
 SG_LOG_TXT="${SG_LOG_TXT:-$SG_LOG_DIR/${SG_TASK}_${SG_TS}.log}"
 SG_LOG_JSONL="${SG_LOG_JSONL:-$SG_LOG_DIR/${SG_TASK}_${SG_TS}.jsonl}"
-
 sg_init_logs() {
-  sudo mkdir -p "$SG_LOG_DIR"
-  sudo touch "$SG_LOG_TXT" "$SG_LOG_JSONL"
-  sudo chown -R "$(id -un)":"$(id -gn)" "$SG_LOG_DIR"
+  # Try without sudo first
+  mkdir -p "$SG_LOG_DIR" 2>/dev/null || true
+  touch "$SG_LOG_TXT" "$SG_LOG_JSONL" 2>/dev/null || true
+
+  if test -w "$SG_LOG_DIR" && test -w "$SG_LOG_TXT" && test -w "$SG_LOG_JSONL"; then
+    return 0
+  fi
+
+  # Try sudo only if non-interactive is allowed (no password prompt)
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n mkdir -p "$SG_LOG_DIR" || true
+    sudo -n touch "$SG_LOG_TXT" "$SG_LOG_JSONL" || true
+    sudo -n chown -R "$(id -un)":"$(id -gn)" "$SG_LOG_DIR" || true
+
+    if test -w "$SG_LOG_DIR" && test -w "$SG_LOG_TXT" && test -w "$SG_LOG_JSONL"; then
+      return 0
+    fi
+  fi
+
+  # Fallback to HOME (always writable)
+  SG_LOG_DIR="${HOME}/sg-runbook-log"
+  mkdir -p "$SG_LOG_DIR"
+  SG_LOG_TXT="$SG_LOG_DIR/${SG_RUNBOOK_ID}_${SG_RUN_TS}.log"
+  SG_LOG_JSONL="$SG_LOG_DIR/${SG_RUNBOOK_ID}_${SG_RUN_TS}.jsonl"
+  touch "$SG_LOG_TXT" "$SG_LOG_JSONL"
 }
 
 sg_now() { date -Is; }
