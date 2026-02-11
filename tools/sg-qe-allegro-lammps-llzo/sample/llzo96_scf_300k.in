@@ -1,0 +1,27 @@
+&CONTROL
+  calculation = 'scf',
+  prefix      = 'llzo',
+  outdir      = 'work',
+  pseudo_dir  = 'pseudos',
+/
+&SYSTEM
+  ibrav=0, nat=96, ntyp=4,
+  ecutwfc=80.0, ecutrho=640.0,
+  occupations='fixed',
+  input_dft='PBE'
+/
+&ELECTRONS
+  conv_thr=1.0d-6, mixing_beta=0.30
+/
+ATOMIC_SPECIES
+  Li 6.94 Li.pbe-s-rrkjus_psl.1.0.0.UPF
+  La 138.905 La.pbe-spfn-rrkjus_psl.1.0.0.UPF
+  Zr 91.224 Zr.pbe-spn-rrkjus_psl.1.0.0.UPF
+  O  15.999 O.pbe-n-rrkjus_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  10.701484332  -0.003885178  -3.552943316
+  -5.574435324   9.134957743  -3.552943407
+   0.002181678   0.003885371  11.275866597
+ATOMIC_POSITIONS crystal
+  ... omitted (use the downloadable sample zip on LP) ...
+K_POINTS gamma

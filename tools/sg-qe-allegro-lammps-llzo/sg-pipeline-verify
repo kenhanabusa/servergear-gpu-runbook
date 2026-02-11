@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+
+STEP="PIPE-VERIFY-200"
+sg_log "PIPE start (v0.1): QE verify -> LAMMPS/Allegro verify"
+
+# 1) QE
+if "$DIR/sg-verify-qe"; then
+  sg_log "QE verify OK"
+else
+  sg_log "QE verify returned non-zero (expected sometimes)."
+fi
+
+# 2) LAMMPS/Allegro
+if "$DIR/sg-verify-lammps-allegro"; then
+  sg_log "LAMMPS verify OK"
+else
+  sg_log "LAMMPS verify returned non-zero (expected sometimes)."
+fi
+
+sg_pass "pipeline verify done (see log/jsonl for classification)." "$STEP" "$DIR/sg-pipeline-verify"

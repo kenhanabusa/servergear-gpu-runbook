@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+
+STEP="QE-INSTALL-010"
+sg_skip "v0.1: installer is not implemented here. Use your existing QE install runbook." "$STEP" "E_QE_NOT_INSTALLED" "sg-install-qe"

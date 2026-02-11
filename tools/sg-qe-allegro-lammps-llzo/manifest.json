@@ -1,0 +1,20 @@
+{
+  "id": "STK-011",
+  "version": "0.1.0",
+  "scope": "QE → Allegro → LAMMPS (LLZO) minimum reproducible pipeline (v0.1)",
+  "principles": [
+    "step_id for every operation",
+    "normalized error codes",
+    "idempotent verify (safe by default)",
+    "logs: human(.log) + machine(.jsonl)"
+  ],
+  "log_dir": "/var/log/sg-runbook",
+  "return_codes": {"ok": 0, "skip": 20, "fail": 40},
+  "known_error_codes": [
+    "E_QE_NOT_INSTALLED",
+    "E_PSEUDO_DIR_MISSING",
+    "E_LMP_NOT_INSTALLED",
+    "E_MODEL_MISSING",
+    "E_DRIVER_OR_CUDA_MISMATCH"
+  ]
+}

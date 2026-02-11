@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+
+STEP="DOC-010"
+
+LOGDIR="${1:-$SG_LOG_DIR}"
+MODE="${2:-classify}"   # classify | emit-prompt
+
+latest_jsonl="$(ls -1t "$LOGDIR"/STK-011_*.jsonl 2>/dev/null | head -n 1 || true)"
+latest_txt="$(ls -1t "$LOGDIR"/STK-011_*.log 2>/dev/null | head -n 1 || true)"
+
+if [ -z "$latest_jsonl" ] && [ -z "$latest_txt" ]; then
+  sg_fail "no logs found in $LOGDIR" "$STEP" "E_NO_LOGS" "ls -la $LOGDIR"
+  exit $?
+fi
+
+sg_log "logdir=$LOGDIR"
+sg_log "latest_jsonl=${latest_jsonl:-<none>}"
+sg_log "latest_txt=${latest_txt:-<none>}"
+
+python3 - <<'PY'
+import json, os, re, pathlib, sys
+
+jsonl = os.environ.get("LATEST_JSONL","")
+txt = os.environ.get("LATEST_TXT","")
+mode = os.environ.get("MODE","classify")
+
+def read_jsonl(p):
+    rows=[]
+    for line in pathlib.Path(p).read_text(encoding="utf-8", errors="ignore").splitlines():
+        line=line.strip()
+        if not line: continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            pass
+    return rows
+
+def classify(rows, txt_content=""):
+    # 最後の fail/skip を優先
+    for r in reversed(rows):
+        if r.get("status") in ("fail","skip"):
+            return r.get("err","-"), r.get("hint",""), r.get("step","")
+    # fallback: text heuristics
+    t = txt_content
+    if re.search(r"pseudo_dir", t, re.I) and re.search(r"no such file|cannot open", t, re.I):
+        return "E_PSEUDO_DIR_MISSING", "pseudo_dir seems wrong", "UNKNOWN"
+    if re.search(r"model\.nequip\.pth|allegro", t, re.I) and re.search(r"no such file|cannot open", t, re.I):
+        return "E_MODEL_MISSING", "model file missing", "UNKNOWN"
+    if re.search(r"CUDA driver version is insufficient|libcuda\.so", t, re.I):
+        return "E_DRIVER_OR_CUDA_MISMATCH", "driver/container mismatch", "UNKNOWN"
+    return "-", "no obvious failure", "UNKNOWN"
+
+rows=[]
+txtc=""
+if jsonl and pathlib.Path(jsonl).exists():
+    rows = read_jsonl(jsonl)
+if txt and pathlib.Path(txt).exists():
+    txtc = pathlib.Path(txt).read_text(encoding="utf-8", errors="ignore")
+
+err, hint, step = classify(rows, txtc)
+
+if mode == "emit-prompt":
+    # LLMに投げやすい“素材”を出す（実行は人間承認前提）
+    print("# Runbook Doctor Prompt Pack\n")
+    print("## Summary")
+    print(f"- err_code: {err}")
+    print(f"- step: {step}")
+    print(f"- hint: {hint}\n")
+    if jsonl:
+        print("## jsonl (tail 40)")
+        tail = "\n".join(pathlib.Path(jsonl).read_text(encoding="utf-8", errors="ignore").splitlines()[-40:])
+        print("```jsonl")
+        print(tail)
+        print("```\n")
+    if txt:
+        print("## log (tail 120)")
+        tail = "\n".join(pathlib.Path(txt).read_text(encoding="utf-8", errors="ignore").splitlines()[-120:])
+        print("```text")
+        print(tail)
+        print("```")
+else:
+    print(f"err={err}\nstep={step}\nhint={hint}")
+PY

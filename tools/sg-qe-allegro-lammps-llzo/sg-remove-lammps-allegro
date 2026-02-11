@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+STEP="LMP-REMOVE-190"
+sg_skip "v0.1: remover is not implemented here." "$STEP" "E_NOT_IMPLEMENTED" "sg-remove-lammps-allegro"

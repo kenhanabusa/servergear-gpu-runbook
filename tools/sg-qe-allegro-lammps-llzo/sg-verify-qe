@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+
+STEP="QE-VERIFY-040"
+INP="${1:-$DIR/sample/llzo96_scf_300k.in}"
+
+sg_log "input=$INP"
+
+# 1) 入力の存在
+if [ ! -f "$INP" ]; then
+  sg_fail "QE input not found" "$STEP" "E_INPUT_NOT_FOUND" "ls -la $INP"
+  exit $?
+fi
+
+# 2) pseudo_dir の存在チェック（よく落ちる）
+PSEUDO_DIR="$(grep -E "^[[:space:]]*pseudo_dir" "$INP" | head -n 1 | sed -E "s/.*=['\"]?([^'\",[:space:]]+).*/\1/")"
+PSEUDO_DIR="${PSEUDO_DIR:-pseudos}"
+
+if [ ! -d "$PSEUDO_DIR" ]; then
+  sg_fail "pseudo_dir missing (typical user error). Set pseudo_dir to actual UPF path." "$STEP" "E_PSEUDO_DIR_MISSING" "pseudo_dir=$PSEUDO_DIR"
+  exit $?
+fi
+
+# 3) pw.x が無ければ SKIP（この段階でも分類できればOK）
+if ! command -v pw.x >/dev/null 2>&1; then
+  sg_skip "pw.x not found; install QE first (or set PATH). input check OK." "$STEP" "E_QE_NOT_INSTALLED" "command -v pw.x"
+  exit $?
+fi
+
+# v0.1: 実行は任意（SG_RUN=1のみ）
+if [ "${SG_RUN:-0}" != "1" ]; then
+  sg_pass "QE preflight OK. Set SG_RUN=1 to actually run pw.x -in ..." "$STEP" "pw.x -in $INP"
+  exit 0
+fi
+
+sg_log "RUN: pw.x -in $INP"
+pw.x -in "$INP" 2>&1 | tee -a "$SG_LOG_TXT"
+sg_pass "pw.x finished (check output manually for now)." "$STEP" "pw.x -in $INP"

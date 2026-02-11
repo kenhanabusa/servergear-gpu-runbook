@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/bin/sg_runbook_lib.sh"
+sg_init_logs
+
+STEP="LMP-VERIFY-140"
+BASE="${1:-$DIR/sample}"
+INP="${2:-$BASE/in.bench1_throughput}"
+DATA="${3:-$BASE/llzo_51840.data}"
+MODEL="${4:-$BASE/model.nequip.pth}"
+
+sg_log "base=$BASE"
+sg_log "inp=$INP"
+sg_log "data=$DATA"
+sg_log "model=$MODEL"
+
+if [ ! -f "$INP" ] || [ ! -f "$DATA" ]; then
+  sg_fail "LAMMPS sample input/data missing" "$STEP" "E_INPUT_NOT_FOUND" "ls -la $BASE"
+  exit $?
+fi
+
+if ! command -v lmp >/dev/null 2>&1 && ! command -v lmp_mpi >/dev/null 2>&1; then
+  sg_skip "LAMMPS binary not found; install first." "$STEP" "E_LMP_NOT_INSTALLED" "command -v lmp"
+  exit $?
+fi
+
+# モデルが無いのは“よくある失敗”として FAIL を出して doctor が拾えるようにする
+if [ ! -f "$MODEL" ]; then
+  sg_fail "Allegro model missing (expected): set MODEL path or place model file." "$STEP" "E_MODEL_MISSING" "MODEL=$MODEL"
+  exit $?
+fi
+
+if [ "${SG_RUN:-0}" != "1" ]; then
+  sg_pass "LAMMPS preflight OK. Set SG_RUN=1 to actually run." "$STEP" "lmp -in $INP"
+  exit 0
+fi
+
+LMPBIN="lmp"
+command -v lmp >/dev/null 2>&1 || LMPBIN="lmp_mpi"
+
+sg_log "RUN: $LMPBIN -in $INP (in BASE=$BASE)"
+(
+  cd "$BASE"
+  $LMPBIN -in "$(basename "$INP")"
+) 2>&1 | tee -a "$SG_LOG_TXT"
+
+sg_pass "LAMMPS run finished (check output manually for now)." "$STEP" "$LMPBIN -in $INP"
