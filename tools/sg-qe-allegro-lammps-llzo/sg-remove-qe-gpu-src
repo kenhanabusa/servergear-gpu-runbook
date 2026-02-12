@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/remove_qe_gpu_STK-014_${TS}.log"
+
+PREFIX_BASE="${PREFIX_BASE:-/opt/sg/qe-gpu}"
+SRC_BASE="${SRC_BASE:-/opt/sg/src}"
+BUILD_BASE="${BUILD_BASE:-/opt/sg/build}"
+QE_TAG="${QE_TAG:-}"
+
+DRY_RUN=0
+REMOVE_SRC=0
+
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
+run(){ if ((DRY_RUN)); then log "DRY-RUN: $*"; else log "RUN: $*"; eval "$@" >>"$LOG" 2>&1; fi }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-remove-qe-gpu-src --tag qe-7.5 [--remove-src] [--dry-run]
+
+If --tag not given: shows installs under PREFIX_BASE.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag) QE_TAG="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --remove-src) REMOVE_SRC=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+
+if [[ -z "$QE_TAG" ]]; then
+  log "Installed prefixes under $PREFIX_BASE:"
+  ls -la "$PREFIX_BASE" 2>/dev/null || true
+  exit 0
+fi
+
+prefix="$PREFIX_BASE/$QE_TAG"
+log "BEGIN remove QE GPU tag=$QE_TAG"
+
+run "rm -rf '$prefix'"
+if (( REMOVE_SRC )); then
+  run "rm -rf '$SRC_BASE/q-e_${QE_TAG}' '$BUILD_BASE/q-e_${QE_TAG}_gpu'"
+fi
+log "OK"

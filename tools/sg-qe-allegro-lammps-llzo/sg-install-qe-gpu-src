@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+# STK-014: QE GPU build from latest source (Ubuntu 24.04)
+
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/install_qe_gpu_STK-014_${TS}.log"
+
+QE_GIT_URL="${QE_GIT_URL:-https://gitlab.com/QEF/q-e.git}"
+QE_TAG="${QE_TAG:-latest}"              # "latest" or explicit like "qe-7.5"
+PREFIX_BASE="${PREFIX_BASE:-/opt/sg/qe-gpu}"
+SRC_BASE="${SRC_BASE:-/opt/sg/src}"
+BUILD_BASE="${BUILD_BASE:-/opt/sg/build}"
+QE_CUDA_CC="${QE_CUDA_CC:-}"            # 80(A100) / 90(H100/H200)
+QE_CUDA_RUNTIME="${QE_CUDA_RUNTIME:-}"  # optional like 12.4
+QE_WITH_SCALAPACK="${QE_WITH_SCALAPACK:-no}"
+JOBS="${JOBS:-$(nproc)}"
+
+ASSUME_YES=0
+DRY_RUN=0
+FORCE_OS=0
+
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
+run(){ if ((DRY_RUN)); then log "DRY-RUN: $*"; else log "RUN: $*"; eval "$@" >>"$LOG" 2>&1; fi }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Usage:
+  sudo sg-install-qe-gpu-src [--yes] [--dry-run] [--force-os] [--tag qe-7.5] [--prefix /opt/sg/qe-gpu]
+
+Env:
+  QE_TAG=latest|qe-7.5
+  QE_CUDA_CC=90 (H100/H200) / 80 (A100)
+  NVHPC_CUDA_HOME must be set (CUDA toolkit path used by NVHPC)
+
+Notes:
+  - This builds GPU-enabled QE from source using NVHPC compilers + OpenACC + CUDA.
+EOF
+}
+
+
+detect_nvhpc_root() {
+  # Prefer explicit NVHPC_ROOT, else pick newest under /opt/nvidia/hpc_sdk/Linux_x86_64
+  if [[ -n "${NVHPC_ROOT:-}" && -d "${NVHPC_ROOT}" ]]; then
+    echo "${NVHPC_ROOT}"; return 0
+  fi
+  local base="/opt/nvidia/hpc_sdk/Linux_x86_64"
+  [[ -d "$base" ]] || return 1
+  local ver
+  ver="$(ls -1 "$base" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+  [[ -n "$ver" ]] || return 1
+  echo "$base/$ver"
+}
+
+detect_cuda_home() {
+  # Prefer explicit NVHPC_CUDA_HOME, else pick newest CUDA under NVHPC_ROOT/cuda/*
+  if [[ -n "${NVHPC_CUDA_HOME:-}" && -d "${NVHPC_CUDA_HOME}" ]]; then
+    echo "${NVHPC_CUDA_HOME}"; return 0
+  fi
+  local root="${1:?}"
+  [[ -d "$root/cuda" ]] || return 1
+  local cv
+  cv="$(ls -1 "$root/cuda" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+  [[ -n "$cv" ]] || return 1
+  echo "$root/cuda/$cv"
+}
+
+detect_comm_libs_home() {
+  # Prefer explicit NVCOMPILER_COMM_LIBS_HOME, else match CUDA version if comm_libs/<cv> exists
+  if [[ -n "${NVCOMPILER_COMM_LIBS_HOME:-}" && -d "${NVCOMPILER_COMM_LIBS_HOME}" ]]; then
+    echo "${NVCOMPILER_COMM_LIBS_HOME}"; return 0
+  fi
+  local root="${1:?}"
+  local cuda_home="${2:?}"
+  local cv; cv="$(basename "$cuda_home")"
+  if [[ -d "$root/comm_libs/$cv" ]]; then
+    echo "$root/comm_libs/$cv"; return 0
+  fi
+  if [[ -d "$root/comm_libs" ]]; then
+    echo "$root/comm_libs"; return 0
+  fi
+  return 1
+}
+
+detect_cuda_cc() {
+  # Best-effort: map from GPU name
+  local name
+  name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$name" ]]; then
+    if echo "$name" | grep -qiE 'H100|H200|Hopper'; then echo "90"; return 0; fi
+    if echo "$name" | grep -qiE 'A100'; then echo "80"; return 0; fi
+  fi
+  # fallback
+  echo "80"
+}
+
+parse_args(){
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes) ASSUME_YES=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --force-os) FORCE_OS=1; shift ;;
+      --tag) QE_TAG="${2:-}"; shift 2 ;;
+      --prefix) PREFIX_BASE="${2:-}"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+}
+
+require_root(){ [[ $EUID -eq 0 ]] || die "run as root (sudo)"; }
+
+os_guard(){
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
+      if ((FORCE_OS)); then
+        log "WARN: OS ID=${ID:-?} VERSION_ID=${VERSION_ID:-?} (continuing due to --force-os)"
+      else
+        die "Unsupported OS (v0.1): ID=${ID:-?} VERSION_ID=${VERSION_ID:-?}"
+      fi
+    fi
+  fi
+}
+
+need(){ command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+pick_latest_tag(){
+  git ls-remote --tags --refs "$QE_GIT_URL" \
+    | awk -F/ '{print $NF}' \
+    | grep -E '^qe-[0-9]+(\.[0-9]+)*$' \
+    | sort -V \
+    | tail -n 1
+}
+
+detect_cuda_cc(){
+  local name
+  name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$name" ]]; then
+    if echo "$name" | grep -qiE 'H100|H200|Hopper'; then echo "90"; return 0; fi
+    if echo "$name" | grep -qiE 'A100'; then echo "80"; return 0; fi
+  fi
+  echo "80"
+}
+
+main(){
+  parse_args "$@"
+  require_root
+  os_guard
+
+  # --- AUTO-DETECT: fill NVHPC_ROOT / NVHPC_CUDA_HOME / NVCOMPILER_COMM_LIBS_HOME / QE_CUDA_CC if missing ---
+  if [[ -z "${NVHPC_ROOT:-}" ]]; then
+    NVHPC_ROOT="$(detect_nvhpc_root || true)"
+    [[ -n "${NVHPC_ROOT}" ]] || die "NVHPC_ROOT not found under /opt/nvidia/hpc_sdk. Install NVHPC first."
+    export NVHPC_ROOT
+  fi
+  if [[ -z "${NVHPC_CUDA_HOME:-}" ]]; then
+    NVHPC_CUDA_HOME="$(detect_cuda_home "${NVHPC_ROOT}" || true)"
+    [[ -n "${NVHPC_CUDA_HOME}" ]] || die "NVHPC_CUDA_HOME not found under ${NVHPC_ROOT}/cuda. Install CUDA component."
+    export NVHPC_CUDA_HOME
+  fi
+  if [[ -z "${NVCOMPILER_COMM_LIBS_HOME:-}" ]]; then
+    NVCOMPILER_COMM_LIBS_HOME="$(detect_comm_libs_home "${NVHPC_ROOT}" "${NVHPC_CUDA_HOME}" || true)"
+    [[ -n "${NVCOMPILER_COMM_LIBS_HOME}" ]] || die "NVCOMPILER_COMM_LIBS_HOME not found under ${NVHPC_ROOT}/comm_libs."
+    export NVCOMPILER_COMM_LIBS_HOME
+  fi
+  if [[ -z "${QE_CUDA_CC:-}" ]]; then
+    QE_CUDA_CC="$(detect_cuda_cc)"
+    export QE_CUDA_CC
+  fi
+  log "AUTO: NVHPC_ROOT=${NVHPC_ROOT}"
+  log "AUTO: NVHPC_CUDA_HOME=${NVHPC_CUDA_HOME}"
+  log "AUTO: NVCOMPILER_COMM_LIBS_HOME=${NVCOMPILER_COMM_LIBS_HOME}"
+  if [[ -z "${QE_CUDA_RUNTIME:-}" ]]; then
+    QE_CUDA_RUNTIME="$(basename "${NVHPC_CUDA_HOME}")"
+    export QE_CUDA_RUNTIME
+  fi
+  log "AUTO: QE_CUDA_CC=${QE_CUDA_CC}"
+  log "AUTO: QE_CUDA_RUNTIME=${QE_CUDA_RUNTIME}"
+  # --- end ---
+
+  mkdir -p "$LOG_DIR" || true
+  log "=== STK-014 install QE GPU from source ==="
+  log "QE_GIT_URL=$QE_GIT_URL"
+  log "QE_TAG=$QE_TAG"
+  log "PREFIX_BASE=$PREFIX_BASE"
+
+  need git
+  need make
+  need gcc
+  need g++
+  need perl
+  need python3
+  need nvidia-smi
+
+# --- FIX: ensure NVHPC compilers in PATH even under sudo/root ---
+if [[ -n "${NVHPC_ROOT:-}" && -d "${NVHPC_ROOT}/compilers/bin" ]]; then
+  export PATH="${NVHPC_ROOT}/compilers/bin:${NVHPC_ROOT}/comm_libs/mpi/bin:${PATH}"
+fi
+# --- end ---
+
+  if ! command -v nvfortran >/dev/null 2>&1; then die "nvfortran not found. Install NVHPC and ensure in PATH."; fi
+  if ! command -v nvc >/dev/null 2>&1; then die "nvc not found. Install NVHPC and ensure in PATH."; fi
+
+  if [[ -z "${NVHPC_CUDA_HOME:-}" ]]; then
+    die "NVHPC_CUDA_HOME is not set. Source NVHPC env (setvars) and retry."
+  fi
+  log "NVHPC_CUDA_HOME=$NVHPC_CUDA_HOME"
+  # --- FIX: enable HPC-X MPI env (required so mpif90 works with nvfortran + CUDA) ---
+  if [[ -z "${NVCOMPILER_COMM_LIBS_HOME:-}" ]]; then
+    _cv="$(basename "${NVHPC_CUDA_HOME}")"
+    if [[ -n "${NVHPC_ROOT:-}" && -d "${NVHPC_ROOT}/comm_libs/${_cv}" ]]; then
+      export NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs/${_cv}"
+    elif [[ -n "${NVHPC_ROOT:-}" && -d "${NVHPC_ROOT}/comm_libs" ]]; then
+      export NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs"
+    fi
+  fi
+  log "NVCOMPILER_COMM_LIBS_HOME=${NVCOMPILER_COMM_LIBS_HOME:-<unset>}"
+
+  if [[ -n "${NVCOMPILER_COMM_LIBS_HOME:-}" && -f "${NVCOMPILER_COMM_LIBS_HOME}/hpcx/latest/hpcx-init.sh" ]]; then
+    HPCX_HOME="${NVCOMPILER_COMM_LIBS_HOME}/hpcx/latest"
+
+    # Don’t let set -e kill the script if HPC-X init returns non-zero.
+    set +e
+    set +u
+    # shellcheck disable=SC1090
+    source "${HPCX_HOME}/hpcx-init.sh" >/dev/null 2>&1
+    _rc_src=$?
+    command -v hpcx_load >/dev/null 2>&1 && hpcx_load >/dev/null 2>&1
+    _rc_load=$?
+    set -u
+    set -e
+
+    if (( _rc_src != 0 )); then log "WARN: source hpcx-init.sh rc=${_rc_src} (continuing)"; fi
+    if (( _rc_load != 0 )); then log "WARN: hpcx_load rc=${_rc_load} (continuing)"; fi
+
+    # Ensure wrappers are reachable even if hpcx_load behaved oddly
+    if [[ -d "${HPCX_HOME}/ompi/bin" ]]; then
+      export PATH="${HPCX_HOME}/ompi/bin:${PATH}"
+    fi
+    if [[ -d "${HPCX_HOME}/ompi/lib" ]]; then
+      export LD_LIBRARY_PATH="${HPCX_HOME}/ompi/lib:${LD_LIBRARY_PATH:-}"
+    fi
+  fi
+  # --- end ---
+  # Ensure NVHPC MPI wrappers are used (critical for GPU build)
+  _mpif90="$(command -v mpif90 2>/dev/null || true)"
+  _mpicc="$(command -v mpicc 2>/dev/null || true)"
+  log "mpif90=${_mpif90}"
+  log "mpicc=${_mpicc}"
+  _mpishow="$(mpif90 -show 2>/dev/null || mpif90 --showme:command 2>/dev/null || true)"
+  log "mpif90 -show: ${_mpishow}"
+  echo "${_mpishow}" | grep -qi nvfortran || die "mpif90 does not use nvfortran (MPI wrapper mismatch). Ensure HPC-X is loaded."
+  if [[ -n "${NVHPC_ROOT:-}" && -d "${NVHPC_ROOT}/comm_libs/mpi/bin" ]]; then
+    if [[ "${_mpif90}" != "${NVHPC_ROOT}/comm_libs/mpi/bin/mpif90" ]]; then
+      log "WARN: mpif90 is not NVHPC_ROOT/comm_libs/mpi/bin (expected when using HPC-X). continuing."
+    fi
+  fi
+
+
+  if [[ -z "$QE_CUDA_CC" ]]; then
+    QE_CUDA_CC="$(detect_cuda_cc)"
+    log "QE_CUDA_CC not set -> detected: $QE_CUDA_CC (override via env QE_CUDA_CC)"
+  else
+    log "QE_CUDA_CC=$QE_CUDA_CC"
+  fi
+
+  run "apt-get update -y"
+  run "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential gfortran m4 cmake pkg-config wget curl libfftw3-dev libopenblas-dev"
+
+  if [[ "$QE_TAG" == "latest" ]]; then
+    QE_TAG="$(pick_latest_tag)"
+    [[ -n "$QE_TAG" ]] || die "could not determine latest QE tag"
+    log "Picked latest QE tag: $QE_TAG"
+  fi
+
+  src_dir="${SRC_BASE}/q-e_${QE_TAG}"
+  build_dir="${BUILD_BASE}/q-e_${QE_TAG}_gpu"
+  prefix="${PREFIX_BASE}/${QE_TAG}"
+
+  run "mkdir -p '$SRC_BASE' '$BUILD_BASE' '$PREFIX_BASE'"
+  if [[ ! -d "$src_dir/.git" ]]; then
+    run "git clone --depth 1 --branch '$QE_TAG' '$QE_GIT_URL' '$src_dir'"
+  else
+    run "git -C '$src_dir' fetch --tags --depth 1"
+    run "git -C '$src_dir' checkout -f '$QE_TAG'"
+  fi
+
+  cfg="./configure --enable-openmp --with-cuda='${NVHPC_CUDA_HOME}' --with-cuda-cc='${QE_CUDA_CC}' --with-scalapack='${QE_WITH_SCALAPACK}'"
+  if [[ -n "$QE_CUDA_RUNTIME" ]]; then
+    cfg="$cfg --with-cuda-runtime='${QE_CUDA_RUNTIME}'"
+  fi
+
+  run "cd '$src_dir' && FC=nvfortran F90=nvfortran F77=nvfortran CC=nvc CXX=nvc++ $cfg"
+  run "cd '$src_dir' && make -j '${JOBS}' all"
+  run "cd '$src_dir' && make install PREFIX='${prefix}'"
+
+  if (( DRY_RUN )); then
+    log "DRY-RUN: write /etc/profile.d/sg-qe-gpu.sh"
+  else
+    cat > /etc/profile.d/sg-qe-gpu.sh <<EOF
+# Server-Gear: QE GPU build (STK-014)
+export QE_GPU_PREFIX="${prefix}"
+if [ -d "\$QE_GPU_PREFIX/bin" ]; then
+  export PATH="\$QE_GPU_PREFIX/bin:\$PATH"
+fi
+EOF
+    chmod 0644 /etc/profile.d/sg-qe-gpu.sh || true
+  fi
+
+  log "OK: installed QE GPU to ${prefix}"
+  log "Next: sg-verify-qe-gpu-src"
+}
+
+main "$@"

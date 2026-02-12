@@ -12,6 +12,20 @@ WORK="${WORK:-/var/tmp/sg-runbook/qe-gpu-verify/${TS}}"
 PSEUDO_DIR="${WORK}/pseudos"
 
 PWX="${QE_PWX:-}"
+
+# --- AUTO-PWX: find latest installed GPU QE pw.x under /opt/sg/qe-gpu ---
+find_latest_pwx() {
+  local base="/opt/sg/qe-gpu"
+  [[ -d "$base" ]] || return 1
+  local tag
+  tag="$(ls -1 "$base" 2>/dev/null | grep -E '^qe-[0-9]+' | sort -V | tail -n 1)"
+  [[ -n "$tag" ]] || return 1
+  local pw="$base/$tag/bin/pw.x"
+  [[ -x "$pw" ]] || return 1
+  echo "$pw"
+}
+# --- end ---
+
 MODE="single"              # single(default) | multi
 KEEP=0
 
@@ -65,7 +79,12 @@ done
 mkdir -p "$WORK" "$PSEUDO_DIR" || die "cannot create WORK=$WORK"
 
 # resolve pw.x
-if [[ -z "$PWX" ]]; then PWX="$(command -v pw.x 2>/dev/null || true)"; fi
+if [[ -z "$PWX" ]]; then
+  PWX="$(find_latest_pwx 2>/dev/null || true)"
+fi
+if [[ -z "$PWX" ]]; then
+  PWX="$(command -v pw.x 2>/dev/null || true)"
+fi
 [[ -n "$PWX" ]] || skip "pw.x not found (install GPU QE first or set QE_PWX)"
 [[ -x "$PWX" ]] || skip "pw.x not executable: $PWX"
 log "pwx=$PWX"
