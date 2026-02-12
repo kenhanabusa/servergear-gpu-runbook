@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
+
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_TXT="${LOG_DIR}/verify_qe_gpu_STK-014_${TS}.log"
+
+# Default WORK: user-writable + persists
+WORK="${WORK:-/var/tmp/sg-runbook/qe-gpu-verify/${TS}}"
+PSEUDO_DIR="${WORK}/pseudos"
+OUT="${WORK}/si_scf.out"
+INP="${WORK}/si_scf.in"
+PWX="${QE_PWX:-}"
+
+QE_NP="${QE_NP:-1}"
+QE_TIMEOUT="${QE_TIMEOUT:-600}"
+
+# Old quantum-espresso.org URL returns 404; use QE pseudo site
+QE_PSEUDO_URL="${QE_PSEUDO_URL:-https://pseudopotentials.quantum-espresso.org/upf_files/Si.pz-vbc.UPF}"
+
+log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG_TXT" 2>/dev/null||true; }
+skip(){ log "SKIP: $*"; exit 2; }
+die(){ log "ERROR: $*"; exit 1; }
+
+KEEP=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keep-work) KEEP=1; shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: sg-verify-qe-gpu-src [--keep-work]
+Env:
+  QE_PWX=...              explicit pw.x
+  WORK=...                work directory (default: ${WORK})
+  QE_PSEUDO_URL=...       pseudopotential URL
+  QE_NP=1                 mpirun ranks (default 1)
+  QE_TIMEOUT=600          timeout seconds (default 600)
+EOF
+      exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+mkdir -p "$WORK" "$PSEUDO_DIR" || die "cannot create WORK=$WORK"
+
+# resolve pw.x
+if [[ -z "$PWX" ]]; then
+  PWX="$(command -v pw.x 2>/dev/null || true)"
+fi
+[[ -n "$PWX" ]] || skip "pw.x not found (install GPU QE first or set QE_PWX)"
+[[ -x "$PWX" ]] || skip "pw.x not executable: $PWX"
+log "pwx=$PWX"
+
+# Load HPC-X if available (pw.x was built with HPC-X mpif90 in this stack)
+NVHPC_ROOT="${NVHPC_ROOT:-}"
+if [[ -z "${NVHPC_ROOT}" && -n "${NVHPC_VERSION:-}" && -d "/opt/nvidia/hpc_sdk/Linux_x86_64/${NVHPC_VERSION}" ]]; then
+  NVHPC_ROOT="/opt/nvidia/hpc_sdk/Linux_x86_64/${NVHPC_VERSION}"
+fi
+NVHPC_CUDA_HOME="${NVHPC_CUDA_HOME:-}"
+if [[ -z "${NVHPC_CUDA_HOME}" && -n "${NVHPC_ROOT}" && -d "${NVHPC_ROOT}/cuda/13.1" ]]; then
+  NVHPC_CUDA_HOME="${NVHPC_ROOT}/cuda/13.1"
+fi
+NVCOMPILER_COMM_LIBS_HOME="${NVCOMPILER_COMM_LIBS_HOME:-}"
+if [[ -z "${NVCOMPILER_COMM_LIBS_HOME}" && -n "${NVHPC_ROOT}" && -n "${NVHPC_CUDA_HOME}" ]]; then
+  cv="$(basename "${NVHPC_CUDA_HOME}")"
+  if [[ -d "${NVHPC_ROOT}/comm_libs/${cv}" ]]; then
+    NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs/${cv}"
+  elif [[ -d "${NVHPC_ROOT}/comm_libs" ]]; then
+    NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs"
+  fi
+fi
+
+if [[ -n "${NVCOMPILER_COMM_LIBS_HOME}" && -f "${NVCOMPILER_COMM_LIBS_HOME}/hpcx/latest/hpcx-init.sh" ]]; then
+  log "load HPC-X: ${NVCOMPILER_COMM_LIBS_HOME}/hpcx/latest"
+  set +e; set +u
+  # shellcheck disable=SC1090
+  source "${NVCOMPILER_COMM_LIBS_HOME}/hpcx/latest/hpcx-init.sh" >/dev/null 2>&1
+  command -v hpcx_load >/dev/null 2>&1 && hpcx_load >/dev/null 2>&1
+  set -u; set -e
+fi
+
+MPIRUN="$(command -v mpirun 2>/dev/null || true)"
+if [[ -z "${MPIRUN}" ]]; then
+  log "WARN: mpirun not found; fallback to direct pw.x (may hang on MPI builds)"
+fi
+
+# Fetch pseudo
+command -v curl >/dev/null 2>&1 || skip "curl not found (install curl)"
+log "fetch pseudo: $QE_PSEUDO_URL"
+curl -fsSL "$QE_PSEUDO_URL" -o "$PSEUDO_DIR/Si.pz-vbc.UPF" || skip "failed to download pseudopotential: $QE_PSEUDO_URL"
+
+# Tiny Si SCF input
+cat > "$INP" <<EOF
+&CONTROL
+  calculation='scf',
+  prefix='si',
+  outdir='${WORK}/tmp',
+  pseudo_dir='${PSEUDO_DIR}',
+/
+&SYSTEM
+  ibrav=2, celldm(1)=10.26,
+  nat=2, ntyp=1,
+  ecutwfc=20.0, ecutrho=160.0,
+/
+&ELECTRONS
+  conv_thr=1.0d-6,
+  mixing_beta=0.7,
+/
+ATOMIC_SPECIES
+  Si  28.0855  Si.pz-vbc.UPF
+ATOMIC_POSITIONS (alat)
+  Si 0.00 0.00 0.00
+  Si 0.25 0.25 0.25
+K_POINTS (automatic)
+  2 2 2  0 0 0
+EOF
+mkdir -p "${WORK}/tmp" || true
+
+log "RUN: mpirun -np ${QE_NP} pw.x < input (timeout=${QE_TIMEOUT}s)"
+set +e
+if [[ -n "${MPIRUN}" ]]; then
+  timeout "${QE_TIMEOUT}" mpirun -np "${QE_NP}" "$PWX" < "$INP" > "$OUT" 2>&1
+else
+  timeout "${QE_TIMEOUT}" "$PWX" < "$INP" > "$OUT" 2>&1
+fi
+RC=$?
+set -e
+
+if [[ "$RC" == "124" ]]; then
+  die "pw.x timed out after ${QE_TIMEOUT}s (likely MPI init/env hang). See $OUT"
+fi
+
+if grep -q "JOB DONE" "$OUT" 2>/dev/null; then
+  log "PASS: SCF completed (JOB DONE). Output: $OUT (rc=$RC)"
+else
+  log "FAIL: SCF did not show JOB DONE. rc=$RC. See $OUT"
+  tail -n 80 "$OUT" 2>/dev/null || true
+  exit 1
+fi
+
+if (( KEEP == 0 )); then
+  log "clean workdir: $WORK (use --keep-work to keep)"
+  rm -rf "$WORK" 2>/dev/null || true
+else
+  log "kept workdir: $WORK"
+fi
+exit 0
