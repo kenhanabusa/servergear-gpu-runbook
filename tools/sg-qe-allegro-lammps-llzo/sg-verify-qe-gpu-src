@@ -7,38 +7,57 @@ LOG_DIR="/var/log/sg-runbook"
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG_TXT="${LOG_DIR}/verify_qe_gpu_STK-014_${TS}.log"
 
-# Default WORK: user-writable + persists
+# user-writable default
 WORK="${WORK:-/var/tmp/sg-runbook/qe-gpu-verify/${TS}}"
 PSEUDO_DIR="${WORK}/pseudos"
-OUT="${WORK}/si_scf.out"
-INP="${WORK}/si_scf.in"
+
 PWX="${QE_PWX:-}"
+MODE="single"              # single(default) | multi
+KEEP=0
 
-QE_NP="${QE_NP:-1}"
-QE_TIMEOUT="${QE_TIMEOUT:-600}"
+# multi params
+NP1="${QE_NP1:-1}"
+NP4="${QE_NP4:-4}"         # target ranks for scaling run (auto capped by GPU count)
+QE_TIMEOUT="${QE_TIMEOUT:-1800}"   # multi is heavier; default 30min safe
+GPU_MON_SINGLE="${GPU_MON_SINGLE:-20}"
+GPU_MON_MULTI="${GPU_MON_MULTI:-120}"
 
-# Old quantum-espresso.org URL returns 404; use QE pseudo site
 QE_PSEUDO_URL="${QE_PSEUDO_URL:-https://pseudopotentials.quantum-espresso.org/upf_files/Si.pz-vbc.UPF}"
 
 log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG_TXT" 2>/dev/null||true; }
 skip(){ log "SKIP: $*"; exit 2; }
 die(){ log "ERROR: $*"; exit 1; }
 
-KEEP=0
+usage(){
+  cat <<EOF
+Usage:
+  sg-verify-qe-gpu-src [--single] [--multi] [--keep-work]
+
+Default: --single
+  - quick sanity (np=1, light Si SCF)
+
+--multi:
+  - run heavy SCF twice (np=1 vs np=4) and print speedup/efficiency
+  - uses k-point pools: np=4 run uses "pw.x -nk 4" (good scaling signal)
+
+Env:
+  QE_PWX=...          pw.x path (recommended)
+  WORK=...            workdir (default: ${WORK})
+  QE_TIMEOUT=1800     timeout seconds per run
+  QE_NP1=1            baseline ranks
+  QE_NP4=4            scaling ranks (will clamp to GPU count)
+  GPU_MON_SINGLE=20   nvidia-smi sample seconds (single)
+  GPU_MON_MULTI=120   nvidia-smi sample seconds (multi)
+  QE_PSEUDO_URL=...   UPF URL
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --single) MODE="single"; shift ;;
+    --multi) MODE="multi"; shift ;;
     --keep-work) KEEP=1; shift ;;
-    -h|--help)
-      cat <<EOF
-Usage: sg-verify-qe-gpu-src [--keep-work]
-Env:
-  QE_PWX=...              explicit pw.x
-  WORK=...                work directory (default: ${WORK})
-  QE_PSEUDO_URL=...       pseudopotential URL
-  QE_NP=1                 mpirun ranks (default 1)
-  QE_TIMEOUT=600          timeout seconds (default 600)
-EOF
-      exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) die "unknown arg: $1" ;;
   esac
 done
@@ -46,14 +65,12 @@ done
 mkdir -p "$WORK" "$PSEUDO_DIR" || die "cannot create WORK=$WORK"
 
 # resolve pw.x
-if [[ -z "$PWX" ]]; then
-  PWX="$(command -v pw.x 2>/dev/null || true)"
-fi
+if [[ -z "$PWX" ]]; then PWX="$(command -v pw.x 2>/dev/null || true)"; fi
 [[ -n "$PWX" ]] || skip "pw.x not found (install GPU QE first or set QE_PWX)"
 [[ -x "$PWX" ]] || skip "pw.x not executable: $PWX"
 log "pwx=$PWX"
 
-# Load HPC-X if available (pw.x was built with HPC-X mpif90 in this stack)
+# Load HPC-X if available (QE was built with HPC-X mpif90 in this stack)
 NVHPC_ROOT="${NVHPC_ROOT:-}"
 if [[ -z "${NVHPC_ROOT}" && -n "${NVHPC_VERSION:-}" && -d "/opt/nvidia/hpc_sdk/Linux_x86_64/${NVHPC_VERSION}" ]]; then
   NVHPC_ROOT="/opt/nvidia/hpc_sdk/Linux_x86_64/${NVHPC_VERSION}"
@@ -82,8 +99,16 @@ if [[ -n "${NVCOMPILER_COMM_LIBS_HOME}" && -f "${NVCOMPILER_COMM_LIBS_HOME}/hpcx
 fi
 
 MPIRUN="$(command -v mpirun 2>/dev/null || true)"
-if [[ -z "${MPIRUN}" ]]; then
-  log "WARN: mpirun not found; fallback to direct pw.x (may hang on MPI builds)"
+[[ -n "${MPIRUN}" ]] || skip "mpirun not found (HPC-X not loaded?)"
+
+NGPU="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ' || true)"
+[[ -n "$NGPU" ]] || NGPU=0
+log "nGPU_detected=$NGPU"
+
+# clamp NP4 by GPU count
+if (( NGPU > 0 )) && (( NP4 > NGPU )); then
+  log "WARN: QE_NP4=$NP4 but only nGPU=$NGPU -> use np=$NGPU"
+  NP4="$NGPU"
 fi
 
 # Fetch pseudo
@@ -91,8 +116,16 @@ command -v curl >/dev/null 2>&1 || skip "curl not found (install curl)"
 log "fetch pseudo: $QE_PSEUDO_URL"
 curl -fsSL "$QE_PSEUDO_URL" -o "$PSEUDO_DIR/Si.pz-vbc.UPF" || skip "failed to download pseudopotential: $QE_PSEUDO_URL"
 
-# Tiny Si SCF input
-cat > "$INP" <<EOF
+mkdir -p "${WORK}/tmp" || true
+
+INP_SINGLE="${WORK}/si_scf_np1.in"
+INP_SCALE="${WORK}/si_scale_4gpu.in"
+OUT_SINGLE="${WORK}/si_scf_np1.out"
+OUT_SCALE1="${WORK}/si_scale_np1.out"
+OUT_SCALE4="${WORK}/si_scale_np${NP4}.out"
+
+# light single input
+cat > "$INP_SINGLE" <<EOF
 &CONTROL
   calculation='scf',
   prefix='si',
@@ -116,28 +149,129 @@ ATOMIC_POSITIONS (alat)
 K_POINTS (automatic)
   2 2 2  0 0 0
 EOF
-mkdir -p "${WORK}/tmp" || true
 
-log "RUN: mpirun -np ${QE_NP} pw.x < input (timeout=${QE_TIMEOUT}s)"
-set +e
-if [[ -n "${MPIRUN}" ]]; then
-  timeout "${QE_TIMEOUT}" mpirun -np "${QE_NP}" "$PWX" < "$INP" > "$OUT" 2>&1
+# heavy input for scaling (k-points + bands increased)
+cat > "$INP_SCALE" <<EOF
+&CONTROL
+  calculation='scf',
+  prefix='si',
+  outdir='${WORK}/tmp',
+  pseudo_dir='${PSEUDO_DIR}',
+/
+&SYSTEM
+  ibrav=2, celldm(1)=10.26,
+  nat=2, ntyp=1,
+  ecutwfc=80.0, ecutrho=640.0,
+  nbnd=200,
+  occupations='smearing', smearing='mp', degauss=0.02,
+/
+&ELECTRONS
+  conv_thr=1.0d-7,
+  mixing_beta=0.7,
+  diagonalization='david',
+/
+ATOMIC_SPECIES
+  Si  28.0855  Si.pz-vbc.UPF
+ATOMIC_POSITIONS (alat)
+  Si 0.00 0.00 0.00
+  Si 0.25 0.25 0.25
+K_POINTS (automatic)
+  12 12 12  0 0 0
+EOF
+
+sample_gpu_util() {
+  local tag="$1"
+  local dur="$2"
+  local out="${WORK}/nvidia_smi_${tag}.csv"
+  ( nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory --format=csv -l 1 -c "$dur" > "$out" 2>/dev/null || true ) &
+  echo $!
+}
+
+max_util_ge2() {
+  local f="$1"
+  awk -F',' '
+    NR==1{next}
+    {gsub(/ /,"",$0); idx=$2; u=$3+0; if(u>mx[idx]) mx[idx]=u}
+    END{
+      c=0;
+      for(i in mx) if(mx[i]>0) c++;
+      if(c>=2) exit 0; else exit 1;
+    }' "$f"
+}
+
+extract_wall_s() {
+  python3 - "$1" <<'PY'
+import re,sys
+p=sys.argv[1]
+wall=None
+for line in open(p,'r',errors='ignore'):
+    if 'PWSCF' in line and 'WALL' in line:
+        m=re.search(r'([0-9]+(?:\.[0-9]+)?)s\s+WALL', line)
+        if m:
+            wall=float(m.group(1))
+if wall is None: print("")
+else: print(f"{wall}")
+PY
+}
+
+run_case() {
+  local np="$1" inp="$2" out="$3" tag="$4" monsec="$5" nk="$6"
+  log "RUN[$tag]: mpirun -np ${np} pw.x -nk ${nk} < ${inp} (timeout=${QE_TIMEOUT}s)"
+  local monpid; monpid="$(sample_gpu_util "$tag" "$monsec")"
+  set +e
+  timeout "${QE_TIMEOUT}" mpirun -np "${np}" bash -lc '
+    export CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK:-0}
+    export ACC_DEVICE_NUM=0
+    exec '"$PWX"' -nk '"$nk"' < '"$inp"'
+  ' > "$out" 2>&1
+  rc=$?
+  set -e
+  kill "$monpid" 2>/dev/null || true
+
+  if [[ "$rc" == "124" ]]; then die "TIMEOUT[$tag]: ${QE_TIMEOUT}s"; fi
+  if ! grep -q "JOB DONE" "$out" 2>/dev/null; then
+    log "FAIL[$tag]: no JOB DONE (rc=$rc). Tail:"
+    tail -n 80 "$out" 2>/dev/null || true
+    die "QE SCF failed [$tag] rc=$rc"
+  fi
+  log "PASS[$tag]: JOB DONE (rc=$rc) out=$out"
+}
+
+if [[ "$MODE" == "single" ]]; then
+  run_case "$NP1" "$INP_SINGLE" "$OUT_SINGLE" "single" "$GPU_MON_SINGLE" 1
+  log "SINGLE: OK (np=${NP1}) out=$OUT_SINGLE"
 else
-  timeout "${QE_TIMEOUT}" "$PWX" < "$INP" > "$OUT" 2>&1
-fi
-RC=$?
-set -e
+  if (( NGPU < 2 )); then
+    skip "MULTI requested but nGPU_detected=$NGPU"
+  fi
 
-if [[ "$RC" == "124" ]]; then
-  die "pw.x timed out after ${QE_TIMEOUT}s (likely MPI init/env hang). See $OUT"
-fi
+  # baseline (np1, nk=1) and scaling (np4, nk=np4) on heavy input
+  run_case "$NP1" "$INP_SCALE" "$OUT_SCALE1" "np${NP1}" "$GPU_MON_MULTI" 1
+  run_case "$NP4" "$INP_SCALE" "$OUT_SCALE4" "np${NP4}" "$GPU_MON_MULTI" "$NP4"
 
-if grep -q "JOB DONE" "$OUT" 2>/dev/null; then
-  log "PASS: SCF completed (JOB DONE). Output: $OUT (rc=$RC)"
-else
-  log "FAIL: SCF did not show JOB DONE. rc=$RC. See $OUT"
-  tail -n 80 "$OUT" 2>/dev/null || true
-  exit 1
+  t1="$(extract_wall_s "$OUT_SCALE1")"
+  t4="$(extract_wall_s "$OUT_SCALE4")"
+  if [[ -n "$t1" && -n "$t4" ]]; then
+    python3 - <<PY
+t1=float("$t1"); t4=float("$t4")
+speed=t1/t4 if t4>0 else 0.0
+eff=speed/($NP4/$NP1) if $NP4>0 else 0.0
+print(f"SCALE: np{int($NP1)}={t1:.3f}s, np{int($NP4)}={t4:.3f}s, speedup={speed:.2f}x, efficiency={eff*100:.1f}%")
+PY
+  else
+    log "WARN: could not parse PWSCF WALL time for scaling (see outputs)"
+  fi
+
+  f="${WORK}/nvidia_smi_np${NP4}.csv"
+  if [[ -s "$f" ]]; then
+    if max_util_ge2 "$f"; then
+      log "MULTI-GPU CHECK: OK (>=2 GPUs had util>0) file=$f"
+    else
+      log "MULTI-GPU CHECK: WARN (could not confirm >=2 GPUs busy) file=$f"
+    fi
+  fi
+
+  log "MULTI: OK (np=${NP1} vs np=${NP4}) out1=$OUT_SCALE1 outM=$OUT_SCALE4"
 fi
 
 if (( KEEP == 0 )); then
