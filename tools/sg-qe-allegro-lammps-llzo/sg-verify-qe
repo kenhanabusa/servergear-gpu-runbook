@@ -32,8 +32,11 @@ if [ ! -d "$PSEUDO_DIR" ]; then
 fi
 
 # 3) pw.x が無ければ SKIP（この段階でも分類できればOK）
-if ! command -v pw.x >/dev/null 2>&1; then
-  sg_skip "pw.x not found; install QE first (or set PATH). input check OK." "$STEP" "E_QE_NOT_INSTALLED" "command -v pw.x"
+PWX="${QE_PWX:-}"
+if [[ -z "${PWX}" ]]; then PWX="$(command -v pw.x 2>/dev/null || true)"; fi
+if [[ -n "${PWX}" ]]; then sg_log "pwx=${PWX}"; fi
+if [[ -z "${PWX}" ]]; then
+  sg_skip "pw.x not found; install QE first (or set PATH or QE_PWX). input check OK." "$STEP" "E_QE_NOT_INSTALLED" "command -v pw.x"
   exit $?
 fi
 

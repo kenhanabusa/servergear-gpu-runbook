@@ -28,6 +28,7 @@ RID = os.environ.get("RID","STK-011")
 PRIMARY = Path(os.environ.get("PRIMARY","/var/log/sg-runbook"))
 FALLBACK = Path(os.environ.get("FALLBACK", str(Path.home()/"sg-runbook-log")))
 RECENT = int(os.environ.get("RECENT","20"))
+DOCTOR_STEP = (os.environ.get("DOCTOR_STEP","") or "").strip()
 
 # Step priority (bigger is more important)
 PRIO = {
@@ -84,6 +85,8 @@ for p in files:
         if not is_fail(r):
             continue
         step = (r.get("step") or "").strip()
+        if DOCTOR_STEP and step != DOCTOR_STEP:
+            continue
         pr = PRIO.get(step, 5)  # unknown steps get small prio
         mtime = p.stat().st_mtime
         if (best is None) or (pr > best_pr) or (pr == best_pr and mtime > best_mtime):
