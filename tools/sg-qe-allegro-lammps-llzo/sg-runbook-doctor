@@ -40,6 +40,17 @@ PRIO = {
 
 OK_WORDS = {"ok","pass","success"}
 
+def normalize_step(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    # e.g., "QE-VERIFY-040" -> "QE_VERIFY"
+    if "-" in raw:
+        parts = raw.split("-")
+        if len(parts) >= 2:
+            return f"{parts[0]}_{parts[1]}"
+    return raw
+
 def is_fail(r: dict) -> bool:
     # Treat as fail if err exists OR status/rc indicates failure
     err = (r.get("err") or "").strip()
@@ -82,9 +93,13 @@ for p in files:
             continue
         if not isinstance(r, dict):
             continue
+        # skip result summary rows (they may have err='-' even when a prior step failed/skip)
+        if r.get("type") == "result":
+            continue
         if not is_fail(r):
             continue
-        step = (r.get("step") or "").strip()
+        raw_step = (r.get("step") or "").strip()
+        step = normalize_step(raw_step)
         if DOCTOR_STEP and step != DOCTOR_STEP:
             continue
         pr = PRIO.get(step, 5)  # unknown steps get small prio
@@ -95,7 +110,7 @@ for p in files:
             best_mtime = mtime
 
 if best is None:
-    # fallback: pick latest file and last line
+    # fallback: pick latest file and last meaningful record (ignore type=result)
     chosen = files[0] if files else None
     r = {}
     if chosen:
@@ -103,16 +118,41 @@ if best is None:
             lines = chosen.read_text(errors="ignore").splitlines()
             for ln in reversed(lines):
                 try:
-                    r = json.loads(ln)
-                    if isinstance(r, dict): break
+                    obj = json.loads(ln)
                 except Exception:
                     continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "result":
+                    continue
+                # respect DOCTOR_STEP filter if specified
+                raw_step = (obj.get("step") or "").strip()
+                step = normalize_step(raw_step)
+                if DOCTOR_STEP and step != DOCTOR_STEP:
+                    continue
+                # prefer records that look non-ok (err/status/rc)
+                err = (obj.get("err") or "").strip()
+                st = obj.get("status")
+                rc = obj.get("rc")
+                if err or (isinstance(st, str) and st.lower() not in OK_WORDS) or (isinstance(rc, int) and rc != 0) or (isinstance(rc, str) and rc.isdigit() and int(rc)!=0):
+                    r = obj
+                    break
+            # if still empty, take last non-result record (even if ok)
+            if not r:
+                for ln in reversed(lines):
+                    try:
+                        obj = json.loads(ln)
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict) and obj.get("type") != "result":
+                        r = obj
+                        break
         except Exception:
             pass
     out = {
         "latest_jsonl": str(chosen) if chosen else "",
         "err": (r.get("err") or ""),
-        "step": (r.get("step") or ""),
+        "step": normalize_step((r.get("step") or "")),
         "hint": (r.get("hint") or ""),
     }
 else:
@@ -120,7 +160,7 @@ else:
     out = {
         "latest_jsonl": str(chosen),
         "err": (r.get("err") or ""),
-        "step": (r.get("step") or ""),
+        "step": normalize_step((r.get("step") or "")),
         "hint": (r.get("hint") or ""),
     }
 

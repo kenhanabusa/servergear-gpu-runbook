@@ -14,6 +14,27 @@ sg_init_logs
 STEP="QE-VERIFY-040"
 INP="${1:-$DIR/sample/llzo96_scf_300k.in}"
 
+# 3) pw.x check helper (supports QE_PWX override)
+check_pwx_or_skip() {
+  local PWX="${QE_PWX:-}"
+  if [[ -z "${PWX}" ]]; then PWX="$(command -v pw.x 2>/dev/null || true)"; fi
+  if [[ -n "${PWX}" ]]; then sg_log "pwx=${PWX}"; fi
+  if [[ -n "${PWX}" && ! -x "${PWX}" ]]; then
+    sg_skip "QE_PWX is set but pw.x is not executable: ${PWX}" "$STEP" "E_QE_NOT_INSTALLED" "ls -la ${PWX}"
+    exit $?
+  fi
+
+  if [[ -z "${PWX}" ]]; then
+    sg_skip "pw.x not found; install QE first (or set PATH or QE_PWX). input check OK." "$STEP" "E_QE_NOT_INSTALLED" "command -v pw.x"
+    exit $?
+  fi
+}
+
+# Optional: check binary first (for onboarding tests)
+if [[ "${QE_CHECK_BINARY_FIRST:-0}" == "1" ]]; then
+  check_pwx_or_skip
+fi
+
 sg_log "input=$INP"
 
 # 1) 入力の存在
@@ -31,14 +52,8 @@ if [ ! -d "$PSEUDO_DIR" ]; then
   exit $?
 fi
 
-# 3) pw.x が無ければ SKIP（この段階でも分類できればOK）
-PWX="${QE_PWX:-}"
-if [[ -z "${PWX}" ]]; then PWX="$(command -v pw.x 2>/dev/null || true)"; fi
-if [[ -n "${PWX}" ]]; then sg_log "pwx=${PWX}"; fi
-if [[ -z "${PWX}" ]]; then
-  sg_skip "pw.x not found; install QE first (or set PATH or QE_PWX). input check OK." "$STEP" "E_QE_NOT_INSTALLED" "command -v pw.x"
-  exit $?
-fi
+# 3) pw.x is required (default: after input checks)
+check_pwx_or_skip
 
 # v0.1: 実行は任意（SG_RUN=1のみ）
 if [ "${SG_RUN:-0}" != "1" ]; then
