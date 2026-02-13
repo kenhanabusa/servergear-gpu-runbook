@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+STK_ID="STK-015"
+STEP="ALLEGRO_VERIFY"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$DIR/../_lib/sg_runbook_lib.sh"
+
+APP_ROOT="/opt/sg/allegro"
+VENV="${APP_ROOT}/venv"
+
+LOG_DIR="$(sg_pick_log_dir)"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_TXT="${LOG_DIR}/verify_allegro_${STK_ID}_${TS}.log"
+LOG_JSONL="${LOG_DIR}/${STK_ID}_${TS}.jsonl"
+
+MODEL_PATH="${MODEL_PATH:-${APP_ROOT}/models/model.pth}"
+VERIFY_MODE="${VERIFY_MODE:-infer}"  # infer|import-only
+PREFER_GPU="${PREFER_GPU:-1}"
+
+sg_log "$LOG_TXT" "BEGIN ${STEP}"
+sg_log "$LOG_TXT" "log_dir=$LOG_DIR"
+sg_log "$LOG_TXT" "venv=$VENV"
+sg_log "$LOG_TXT" "model_path=$MODEL_PATH"
+
+[[ -x "$VENV/bin/python" ]] || sg_fail "E_ALLEGRO_IMPORT_FAIL" "venv missing: run sg-install-allegro" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+
+out="$("$VENV/bin/python" - <<'PY' 2>&1 || true
+import os, sys
+try:
+    import torch
+except Exception as e:
+    print("E_TORCH_MISSING", e)
+    sys.exit(40)
+try:
+    import allegro
+except Exception as e:
+    print("E_ALLEGRO_IMPORT_FAIL", e)
+    sys.exit(40)
+
+cuda_ok = torch.cuda.is_available()
+print(f"torch={torch.__version__} cuda_available={cuda_ok}")
+
+prefer = os.environ.get("PREFER_GPU","1") == "1"
+if prefer and not cuda_ok:
+    print("E_TORCH_CUDA_MISSING torch.cuda.is_available()==False")
+    sys.exit(40)
+
+model_path = os.environ.get("MODEL_PATH","")
+mode = (os.environ.get("VERIFY_MODE","infer") or "infer").strip()
+if mode != "import-only":
+    if not model_path:
+        print("E_MODEL_MISSING MODEL_PATH is empty")
+        sys.exit(40)
+    if not os.path.exists(model_path):
+        print(f"E_MODEL_MISSING model not found: {model_path}")
+        sys.exit(40)
+
+print("IMPORT_ONLY_OK" if mode=="import-only" else "INFER_OK_STUB")
+sys.exit(0)
+PY
+)"
+sg_log "$LOG_TXT" "$out"
+
+if echo "$out" | grep -q "E_TORCH_MISSING"; then
+  sg_fail "E_TORCH_MISSING" "torch missing in venv (re-run sg-install-allegro)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+fi
+if echo "$out" | grep -q "E_ALLEGRO_IMPORT_FAIL"; then
+  sg_fail "E_ALLEGRO_IMPORT_FAIL" "allegro import failed" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+fi
+if echo "$out" | grep -q "E_TORCH_CUDA_MISSING"; then
+  sg_fail "E_TORCH_CUDA_MISSING" "torch cuda not available (driver/torch mismatch)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+fi
+if echo "$out" | grep -q "E_MODEL_MISSING"; then
+  sg_fail "E_MODEL_MISSING" "model missing. Run sg-fetch-model-allegro then retry." "$STEP" "$LOG_JSONL" "$LOG_TXT"
+fi
+
+sg_pass "Allegro import OK (inference stub OK)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
