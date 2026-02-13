@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+APP_ROOT="/opt/sg/allegro"
+MODEL_DIR="${APP_ROOT}/models"
+MODEL_ZIP="${MODEL_DIR}/Allegro-OAM-L-0.1.nequip.zip"
+
+DEFAULT_MODEL_URL="https://zenodo.org/records/16980200/files/Allegro-OAM-L-0.1.nequip.zip?download=1"
+MODEL_URL="${MODEL_URL:-$DEFAULT_MODEL_URL}"
+
+echo "[INFO] target: ${MODEL_ZIP}"
+echo "[INFO] url   : ${MODEL_URL}"
+echo "[NOTE] public model download; check attribution/license before redistribution."
+
+sudo mkdir -p "$MODEL_DIR"
+sudo curl -fL --retry 3 --retry-delay 2 "$MODEL_URL" -o "$MODEL_ZIP"
+sudo ls -lh "$MODEL_ZIP"
+echo "[OK] downloaded model zip"
+echo "[NEXT] VERIFY_MODE=infer tools/sg-allegro/sg-verify-allegro"

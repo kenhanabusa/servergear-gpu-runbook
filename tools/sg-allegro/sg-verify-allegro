@@ -16,24 +16,38 @@ TS="$(date +%Y%m%d_%H%M%S)"
 LOG_TXT="${LOG_DIR}/verify_allegro_${STK_ID}_${TS}.log"
 LOG_JSONL="${LOG_DIR}/${STK_ID}_${TS}.jsonl"
 
-MODEL_PATH="${MODEL_PATH:-${APP_ROOT}/models/model.pth}"
-VERIFY_MODE="${VERIFY_MODE:-infer}"  # infer|import-only
-PREFER_GPU="${PREFER_GPU:-1}"
+MODEL_PATH="${MODEL_PATH:-${APP_ROOT}/models/Allegro-OAM-L-0.1.nequip.zip}"
+COMPILED_PATH="${COMPILED_PATH:-${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth}"
+VERIFY_MODE="${VERIFY_MODE:-infer}"          # infer|import-only
+PREFER_GPU="${PREFER_GPU:-1}"               # 1: GPU優先（cudaが無ければFAIL）
+FORCE_COMPILE="${FORCE_COMPILE:-0}"
 
 sg_log "$LOG_TXT" "BEGIN ${STEP}"
 sg_log "$LOG_TXT" "log_dir=$LOG_DIR"
 sg_log "$LOG_TXT" "venv=$VENV"
+sg_log "$LOG_TXT" "mode=$VERIFY_MODE"
 sg_log "$LOG_TXT" "model_path=$MODEL_PATH"
+sg_log "$LOG_TXT" "compiled_path=$COMPILED_PATH"
+mkdir -p "$(dirname "$COMPILED_PATH")" 2>/dev/null || true
 
 [[ -x "$VENV/bin/python" ]] || sg_fail "E_ALLEGRO_IMPORT_FAIL" "venv missing: run sg-install-allegro" "$STEP" "$LOG_JSONL" "$LOG_TXT"
 
-out="$("$VENV/bin/python" - <<'PY' 2>&1 || true
-import os, sys
+out="$(VENV="$VENV" MODEL_PATH="$MODEL_PATH" COMPILED_PATH="$COMPILED_PATH" VERIFY_MODE="$VERIFY_MODE" PREFER_GPU="$PREFER_GPU" FORCE_COMPILE="$FORCE_COMPILE" "$VENV/bin/python" - <<'PY' 2>&1 || true
+import os, sys, subprocess, shlex, shutil
+
+VENV = os.environ.get("VENV","")
+model_path = os.environ.get("MODEL_PATH","")
+compiled = os.environ.get("COMPILED_PATH","")
+mode = (os.environ.get("VERIFY_MODE","infer") or "infer").strip()
+prefer_gpu = (os.environ.get("PREFER_GPU","1") == "1")
+force_compile = (os.environ.get("FORCE_COMPILE","0") == "1")
+
 try:
     import torch
 except Exception as e:
     print("E_TORCH_MISSING", e)
     sys.exit(40)
+
 try:
     import allegro
 except Exception as e:
@@ -43,22 +57,54 @@ except Exception as e:
 cuda_ok = torch.cuda.is_available()
 print(f"torch={torch.__version__} cuda_available={cuda_ok}")
 
-prefer = os.environ.get("PREFER_GPU","1") == "1"
-if prefer and not cuda_ok:
+if prefer_gpu and not cuda_ok:
     print("E_TORCH_CUDA_MISSING torch.cuda.is_available()==False")
     sys.exit(40)
 
-model_path = os.environ.get("MODEL_PATH","")
-mode = (os.environ.get("VERIFY_MODE","infer") or "infer").strip()
-if mode != "import-only":
-    if not model_path:
-        print("E_MODEL_MISSING MODEL_PATH is empty")
-        sys.exit(40)
-    if not os.path.exists(model_path):
-        print(f"E_MODEL_MISSING model not found: {model_path}")
-        sys.exit(40)
+if mode == "import-only":
+    print("IMPORT_ONLY_OK")
+    sys.exit(0)
 
-print("IMPORT_ONLY_OK" if mode=="import-only" else "INFER_OK_STUB")
+if not model_path:
+    print("E_MODEL_MISSING MODEL_PATH is empty")
+    sys.exit(40)
+if not os.path.exists(model_path):
+    print(f"E_MODEL_MISSING model not found: {model_path}")
+    sys.exit(40)
+
+# locate nequip-compile
+nequip_compile = os.path.join(VENV, "bin", "nequip-compile") if VENV else "nequip-compile"
+if not shutil.which(nequip_compile):
+    print("E_INFER_FAIL nequip-compile not found (install nequip)")
+    sys.exit(40)
+
+device = "cuda" if cuda_ok else "cpu"
+
+do_compile = force_compile or (not os.path.exists(compiled))
+if (not do_compile) and os.path.exists(compiled):
+    try:
+        do_compile = os.path.getmtime(compiled) < os.path.getmtime(model_path)
+    except Exception:
+        do_compile = True
+
+if do_compile:
+    cmd = [nequip_compile, model_path, compiled, "--device", device, "--mode", "torchscript"]
+    print("RUN:", " ".join(shlex.quote(x) for x in cmd))
+    try:
+        subprocess.check_call(cmd)
+    except Exception as e:
+        print("E_INFER_FAIL nequip-compile failed", e)
+        sys.exit(40)
+else:
+    print("SKIP compile: compiled is up-to-date")
+
+try:
+    _m = torch.jit.load(compiled, map_location="cpu")
+except Exception as e:
+    print("E_INFER_FAIL torch.jit.load failed", e)
+    sys.exit(40)
+
+print("INFER_OK_COMPILED", compiled)
 sys.exit(0)
 PY
 )"
@@ -76,5 +122,8 @@ fi
 if echo "$out" | grep -q "E_MODEL_MISSING"; then
   sg_fail "E_MODEL_MISSING" "model missing. Run sg-fetch-model-allegro then retry." "$STEP" "$LOG_JSONL" "$LOG_TXT"
 fi
+if echo "$out" | grep -q "E_INFER_FAIL"; then
+  sg_fail "E_INFER_FAIL" "compile/load failed (see log). try reinstall or set PREFER_GPU=0" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+fi
 
-sg_pass "Allegro import OK (inference stub OK)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+sg_pass "Allegro infer OK (model compiled + loadable)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
