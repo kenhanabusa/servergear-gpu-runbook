@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
+OUT_MODEL="${SAMPLE_DIR}/model.nequip.pth"
+
+mkdir -p "$SAMPLE_DIR"
+
+# If caller provides a compiled model URL, use it directly
+if [[ -n "${MODEL_URL:-}" ]]; then
+  command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+  echo "[fetch-model] MODEL_URL -> $OUT_MODEL"
+  curl -fL --retry 3 --retry-delay 2 "$MODEL_URL" -o "$OUT_MODEL"
+  ls -lh "$OUT_MODEL"
+  echo "[OK] downloaded compiled model"
+  exit 0
+fi
+
+# Try to reuse compiled model from STK-015 (preferred)
+if [[ -f "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" ]]; then
+  echo "[fetch-model] reuse STK-015 compiled model -> $OUT_MODEL"
+  cp -a "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" "$OUT_MODEL"
+  ls -lh "$OUT_MODEL"
+  echo "[OK] copied compiled model"
+  exit 0
+fi
+
+# Else compile OAM zip using nequip-compile if available on host
+NEQUIP_COMPILE=""
+if [[ -x "/opt/sg/allegro/venv/bin/nequip-compile" ]]; then
+  NEQUIP_COMPILE="/opt/sg/allegro/venv/bin/nequip-compile"
+elif command -v nequip-compile >/dev/null 2>&1; then
+  NEQUIP_COMPILE="$(command -v nequip-compile)"
+fi
+
+if [[ -z "$NEQUIP_COMPILE" ]]; then
+  echo "[ERROR] No compiled model URL (MODEL_URL) and no STK-015 compiled cache found." >&2
+  echo "[HINT] Run STK-015 infer once to generate ~/.cache/sg-allegro/compiled_allegro.nequip.pth," >&2
+  echo "       or set MODEL_URL to a compiled model, then rerun sg-fetch-model." >&2
+  exit 2
+fi
+
+OAM_ZIP="${SAMPLE_DIR}/Allegro-OAM-L-0.1.nequip.zip"
+DEFAULT_OAM_URL="https://zenodo.org/records/16980200/files/Allegro-OAM-L-0.1.nequip.zip?download=1"
+OAM_URL="${OAM_URL:-$DEFAULT_OAM_URL}"
+
+command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+echo "[fetch-model] download OAM zip -> $OAM_ZIP"
+curl -fL --retry 3 --retry-delay 2 "$OAM_URL" -o "$OAM_ZIP"
+
+# choose device
+DEV="cpu"
+if command -v nvidia-smi >/dev/null 2>&1; then DEV="cuda"; fi
+
+echo "[compile] $NEQUIP_COMPILE $OAM_ZIP -> $OUT_MODEL (device=$DEV)"
+"$NEQUIP_COMPILE" "$OAM_ZIP" "$OUT_MODEL" --device "$DEV" --mode torchscript
+ls -lh "$OUT_MODEL"
+echo "[OK] compiled model"

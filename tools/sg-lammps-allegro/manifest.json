@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "log_dir": "/var/log/sg-runbook",
   "known_error_codes": [
+    "E_APPTAINER_NOT_FOUND",
+    "E_SIF_MISSING",
     "E_LMP_NOT_INSTALLED",
     "E_LMP_SAMPLE_MISSING",
     "E_MODEL_MISSING",

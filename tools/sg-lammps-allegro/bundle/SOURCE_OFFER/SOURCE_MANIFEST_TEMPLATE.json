@@ -1,0 +1,33 @@
+{
+  "bundle": "lammps-allegro",
+  "bundle_version": "0.1.0",
+  "built_on": "YYYY-MM-DD",
+  "components": [
+    {
+      "name": "LAMMPS",
+      "license": "GPL-2.0",
+      "source_url": "https://github.com/lammps/lammps",
+      "source_tag_or_commit": "REPLACE_ME",
+      "patches": []
+    },
+    {
+      "name": "pair_nequip_allegro",
+      "license": "MIT",
+      "source_url": "https://github.com/mir-group/pair_nequip_allegro",
+      "source_tag_or_commit": "REPLACE_ME",
+      "patches": []
+    },
+    {
+      "name": "nequip / allegro",
+      "license": "MIT",
+      "pypi": ["nequip", "nequip-allegro"],
+      "versions": { "nequip": "REPLACE_ME", "nequip-allegro": "REPLACE_ME", "torch": "REPLACE_ME" }
+    },
+    {
+      "name": "Model (optional)",
+      "license": "CC-BY-4.0",
+      "source": "Zenodo DOI: 10.5281/zenodo.16980200",
+      "files": []
+    }
+  ]
+}

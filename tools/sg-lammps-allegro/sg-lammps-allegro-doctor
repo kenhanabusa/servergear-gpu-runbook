@@ -1,11 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
+
 STK_ID="STK-016"
-DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-source "$DIR/../_lib/sg_runbook_lib.sh"
-latest="$(ls -1t /var/log/sg-runbook/${STK_ID}_*.jsonl 2>/dev/null | head -n 1 || true)"
-[[ -n "$latest" ]] || latest="$(ls -1t "$HOME/sg-runbook-log/${STK_ID}_*.jsonl" 2>/dev/null | head -n 1 || true)"
+PRIMARY="/var/log/sg-runbook"
+FALLBACK="${HOME}/sg-runbook-log"
+
+pick_latest() { ls -1t "$1"/"${STK_ID}"_*.jsonl 2>/dev/null | head -n 1 || true; }
+
+latest="$(pick_latest "$PRIMARY")"
+[[ -n "$latest" ]] || latest="$(pick_latest "$FALLBACK")"
+
 echo "[doctor] rid=${STK_ID}"
 echo "[doctor] latest_jsonl=${latest:-<none>}"
+
+if [[ -z "${latest:-}" ]]; then
+  echo "err=E_NO_LOG"
+  echo "next_cmds:"
+  echo "  - tools/sg-lammps-allegro/sg-install-lammps-allegro"
+  echo "  - tools/sg-lammps-allegro/sg-fetch-sample-lammps"
+  echo "  - tools/sg-lammps-allegro/sg-fetch-model"
+  echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
+  exit 0
+fi
+
+eval "$(
+python3 - "$latest" <<'PY'
+import json,sys,shlex
+path=sys.argv[1]
+last={}
+for ln in open(path,'r',errors='ignore'):
+  ln=ln.strip()
+  if not ln: continue
+  try: obj=json.loads(ln)
+  except Exception: continue
+  if isinstance(obj,dict) and obj.get("type")!="result":
+    last=obj
+def q(x): return shlex.quote(str(x or ""))
+print("ERR="+q(last.get("err","")))
+print("HINT="+q(last.get("hint","")))
+PY
+)"
+echo "err=${ERR:-}"
+echo "hint=${HINT:-}"
+echo "next_cmds:"
+case "${ERR:-}" in
+  E_SIF_MISSING|E_APPTAINER_NOT_FOUND|E_LMP_NOT_INSTALLED)
+    echo "  - sudo tools/sg-lammps-allegro/sg-install-lammps-allegro --yes (set SG_LMPA_SIF_URL if needed)"
+    echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
+    ;;
+  E_LMP_SAMPLE_MISSING)
+    echo "  - tools/sg-lammps-allegro/sg-fetch-sample-lammps (set SG_LMP_SAMPLE_URL if needed)"
+    echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
+    ;;
+  E_MODEL_MISSING)
+    echo "  - tools/sg-lammps-allegro/sg-fetch-model (or set MODEL_URL to compiled model)"
+    echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
+    ;;
+  *)
+    echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
+    ;;
+esac

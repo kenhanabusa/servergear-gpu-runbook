@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+STK_ID="STK-016"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/bundle_lammps_allegro_${STK_ID}_${TS}.log"
+
+log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+
+BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
+SIF_SRC="${SG_LMPA_SIF_PATH:-/opt/containers/sg-lammps-allegro.sif}"  # 既にあるSIFを前提
+SIF_DST="${BUNDLE_ROOT}/sg-lammps-allegro.sif"
+
+log "BEGIN bundle create"
+log "BUNDLE_ROOT=$BUNDLE_ROOT"
+log "SIF_SRC=$SIF_SRC"
+
+[[ -f "$SIF_SRC" ]] || die "SIF not found: $SIF_SRC"
+
+mkdir -p "$BUNDLE_ROOT"/{sample,models,THIRD_PARTY_NOTICES,BUILD_RECIPES,SOURCE_OFFER} || true
+
+# SIFをコピー（同梱）
+install -m 0644 "$SIF_SRC" "$SIF_DST"
+sha256sum "$SIF_DST" | tee "$BUNDLE_ROOT/SIF_SHA256.txt" >/dev/null
+
+# SOURCE_MANIFEST（テンプレをコピーして、必要なら手で埋める）
+if [[ ! -f "$BUNDLE_ROOT/SOURCE_MANIFEST.json" ]]; then
+  if [[ -f "tools/sg-lammps-allegro/bundle/SOURCE_OFFER/SOURCE_MANIFEST_TEMPLATE.json" ]]; then
+    cp -a "tools/sg-lammps-allegro/bundle/SOURCE_OFFER/SOURCE_MANIFEST_TEMPLATE.json" "$BUNDLE_ROOT/SOURCE_MANIFEST.json"
+  else
+    echo '{"bundle":"lammps-allegro","note":"fill source manifest"}' > "$BUNDLE_ROOT/SOURCE_MANIFEST.json"
+  fi
+fi
+
+# THIRD_PARTY_NOTICES
+if [[ ! -f "$BUNDLE_ROOT/THIRD_PARTY_NOTICES/NOTICE.md" ]]; then
+  cp -a "tools/sg-lammps-allegro/bundle/THIRD_PARTY_NOTICES/NOTICE.md" "$BUNDLE_ROOT/THIRD_PARTY_NOTICES/NOTICE.md" 2>/dev/null || true
+fi
+
+log "OK: bundle created at $BUNDLE_ROOT"
+log "Next: copy sample/models if you want offline demo"

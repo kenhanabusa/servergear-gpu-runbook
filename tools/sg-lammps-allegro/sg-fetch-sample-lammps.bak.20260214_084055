@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
+URL_DEFAULT="https://notes.server-gear.com/assets/downloads/lammps_allegro_llzo_50k_inputs_20260211.zip"
+URL="${SG_LMP_SAMPLE_URL:-$URL_DEFAULT}"
+
+mkdir -p "$SAMPLE_DIR"
+command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+command -v unzip >/dev/null 2>&1 || { echo "[ERROR] unzip not found" >&2; exit 2; }
+
+echo "[fetch] $URL"
+curl -fL --retry 3 --retry-delay 2 "$URL" -o "$SAMPLE_DIR/sample.zip"
+unzip -o "$SAMPLE_DIR/sample.zip" -d "$SAMPLE_DIR" >/dev/null
+echo "OK: placed LAMMPS sample into $SAMPLE_DIR"

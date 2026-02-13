@@ -1,20 +1,85 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
+
 STK_ID="STK-016"
+STEP="LMPA_INSTALL"
+
+SIF_DEFAULT="/opt/containers/sg-lammps-allegro.sif"
 APP_ROOT="/opt/sg/lammps-allegro"
-URL="${SG_LMP_ALLEGRO_URL:-}"
+META_DIR="${APP_ROOT}/meta"
+
+MODE="${SG_LMPA_MODE:-bundle}"                 # bundle|url|local
+BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
+SIF_PATH="${SG_LMPA_SIF_PATH:-$SIF_DEFAULT}"   # install先
+SIF_URL="${SG_LMPA_SIF_URL:-}"                 # urlモード用
+SIF_LOCAL="${SG_LMPA_SIF_LOCAL:-}"             # localモード用（既存SIFパス）
+
 LOG_DIR="/var/log/sg-runbook"
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG="${LOG_DIR}/install_lammps_allegro_${STK_ID}_${TS}.log"
+
+ASSUME_YES=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes) ASSUME_YES=1; shift ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --bundle-root) BUNDLE_ROOT="${2:-}"; shift 2 ;;
+    --sif-url) SIF_URL="${2:-}"; shift 2 ;;
+    --sif-path) SIF_PATH="${2:-}"; shift 2 ;;
+    --sif-local) SIF_LOCAL="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<EOF
+Usage: sudo sg-install-lammps-allegro --yes [--mode bundle|url|local]
+Defaults:
+  --mode bundle
+  bundle root: /opt/sg/bundles/lammps-allegro
+  install SIF path: /opt/containers/sg-lammps-allegro.sif
+Env:
+  SG_LMPA_MODE=bundle|url|local
+  SG_LMPA_BUNDLE_ROOT=...
+  SG_LMPA_SIF_URL=...
+  SG_LMPA_SIF_LOCAL=...
+EOF
+      exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
 log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
 die(){ log "ERROR: $*"; exit 1; }
+
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
-mkdir -p "$APP_ROOT" || true
-[[ -n "$URL" ]] || die "SG_LMP_ALLEGRO_URL not set (provide distributable bundle URL)"
-command -v curl >/dev/null 2>&1 || { apt-get update -y; apt-get install -y curl; }
-command -v unzip >/dev/null 2>&1 || { apt-get update -y; apt-get install -y unzip; }
-log "FETCH: $URL"
-curl -fsSL "$URL" -o "$APP_ROOT/lmp.zip" >>"$LOG" 2>&1
-unzip -o "$APP_ROOT/lmp.zip" -d "$APP_ROOT" >>"$LOG" 2>&1
+
+command -v apptainer >/dev/null 2>&1 || {
+  log "INFO: apptainer not found; installing via apt..."
+  apt-get update -y >>"$LOG" 2>&1
+  apt-get install -y apptainer >>"$LOG" 2>&1 || die "failed to install apptainer"
+}
+command -v curl >/dev/null 2>&1 || { apt-get update -y >>"$LOG" 2>&1; apt-get install -y curl >>"$LOG" 2>&1; }
+
+mkdir -p "$(dirname "$SIF_PATH")" "$META_DIR" || true
+log "BEGIN ${STEP}"
+log "MODE=$MODE"
+log "SIF_PATH=$SIF_PATH"
+
+case "$MODE" in
+  bundle)
+    BUNDLE_SIF="${BUNDLE_ROOT}/sg-lammps-allegro.sif"
+    [[ -f "$BUNDLE_SIF" ]] || die "bundle SIF missing: $BUNDLE_SIF (run sg-make-bundle-lammps-allegro or place SIF)"
+    install -m 0644 "$BUNDLE_SIF" "$SIF_PATH"
+    ;;
+  url)
+    [[ -n "$SIF_URL" ]] || die "SG_LMPA_SIF_URL not set for url mode"
+    curl -fL --retry 3 --retry-delay 2 "$SIF_URL" -o "$SIF_PATH" >>"$LOG" 2>&1 || die "failed to download SIF"
+    ;;
+  local)
+    [[ -n "$SIF_LOCAL" && -f "$SIF_LOCAL" ]] || die "SG_LMPA_SIF_LOCAL not set or file missing"
+    install -m 0644 "$SIF_LOCAL" "$SIF_PATH"
+    ;;
+  *) die "unknown MODE=$MODE" ;;
+esac
+
+echo "$SIF_PATH" > "$META_DIR/sif_path.txt"
 log "OK"
+log "Next: sg-fetch-sample-lammps -> sg-fetch-model -> sg-verify-lammps-allegro"

@@ -1,12 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
+
+STK_ID="STK-016"
+STEP="LMPA_REMOVE"
 APP_ROOT="/opt/sg/lammps-allegro"
 LOG_DIR="/var/log/sg-runbook"
 TS="$(date +%Y%m%d_%H%M%S)"
-LOG="${LOG_DIR}/remove_lammps_allegro_STK-016_${TS}.log"
+LOG="${LOG_DIR}/remove_lammps_allegro_${STK_ID}_${TS}.log"
+
+PURGE_SIF=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes) shift ;;
+    --purge-sif) PURGE_SIF=1; shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: sudo sg-remove-lammps-allegro --yes [--purge-sif]
+Default: keep /opt/containers/sg-lammps-allegro.sif
+EOF
+      exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
 log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
-[[ $EUID -eq 0 ]] || { log "ERROR: run as root"; exit 1; }
-log "BEGIN remove $APP_ROOT"
+die(){ log "ERROR: $*"; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+
+log "BEGIN ${STEP} app_root=$APP_ROOT purge_sif=$PURGE_SIF"
+SIF_DEFAULT="/opt/containers/sg-lammps-allegro.sif"
+SIF_PATH="$SIF_DEFAULT"
+if [[ -f "$APP_ROOT/meta/sif_path.txt" ]]; then
+  s="$(cat "$APP_ROOT/meta/sif_path.txt" 2>/dev/null || true)"
+  [[ -n "$s" ]] && SIF_PATH="$s"
+fi
+
 rm -rf "$APP_ROOT" || true
+if (( PURGE_SIF == 1 )); then
+  rm -f "$SIF_PATH" || true
+  log "PURGED SIF: $SIF_PATH"
+else
+  log "KEPT SIF: $SIF_PATH"
+fi
 log "OK"

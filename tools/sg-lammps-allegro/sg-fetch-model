@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
+OUT_MODEL="${SAMPLE_DIR}/model.nequip.pth"
+BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
+
+mkdir -p "$SAMPLE_DIR"
+
+# 0) bundleにcompiledモデルがあれば最優先でコピー（オフライン対応）
+if [[ -f "$BUNDLE_ROOT/models/model.nequip.pth" ]]; then
+  echo "[fetch-model] bundle compiled model -> $OUT_MODEL"
+  cp -a "$BUNDLE_ROOT/models/model.nequip.pth" "$OUT_MODEL"
+  ls -lh "$OUT_MODEL"
+  echo "[OK] copied compiled model from bundle"
+  exit 0
+fi
+
+# 1) compiled model URLがあるならそれを使う
+if [[ -n "${MODEL_URL:-}" ]]; then
+  command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+  echo "[fetch-model] MODEL_URL -> $OUT_MODEL"
+  curl -fL --retry 3 --retry-delay 2 "$MODEL_URL" -o "$OUT_MODEL"
+  ls -lh "$OUT_MODEL"
+  echo "[OK] downloaded compiled model"
+  exit 0
+fi
+
+# 2) STK-015 compiled cacheを再利用
+if [[ -f "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" ]]; then
+  echo "[fetch-model] reuse STK-015 compiled model -> $OUT_MODEL"
+  cp -a "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" "$OUT_MODEL"
+  ls -lh "$OUT_MODEL"
+  echo "[OK] copied compiled model"
+  exit 0
+fi
+
+# 3) OAM zipを落として compile（ホストにnequip-compileが必要）
+NEQUIP_COMPILE=""
+if [[ -x "/opt/sg/allegro/venv/bin/nequip-compile" ]]; then
+  NEQUIP_COMPILE="/opt/sg/allegro/venv/bin/nequip-compile"
+elif command -v nequip-compile >/dev/null 2>&1; then
+  NEQUIP_COMPILE="$(command -v nequip-compile)"
+fi
+
+if [[ -z "$NEQUIP_COMPILE" ]]; then
+  echo "[ERROR] No MODEL_URL, no bundle model, no STK-015 cache, and no nequip-compile." >&2
+  echo "[HINT] Run STK-015 infer once, or provide MODEL_URL, or bundle a compiled model." >&2
+  exit 2
+fi
+
+OAM_ZIP="${SAMPLE_DIR}/Allegro-OAM-L-0.1.nequip.zip"
+DEFAULT_OAM_URL="https://zenodo.org/records/16980200/files/Allegro-OAM-L-0.1.nequip.zip?download=1"
+OAM_URL="${OAM_URL:-$DEFAULT_OAM_URL}"
+
+command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+echo "[fetch-model] download OAM zip -> $OAM_ZIP"
+curl -fL --retry 3 --retry-delay 2 "$OAM_URL" -o "$OAM_ZIP"
+
+DEV="cpu"
+if command -v nvidia-smi >/dev/null 2>&1; then DEV="cuda"; fi
+echo "[compile] $NEQUIP_COMPILE $OAM_ZIP -> $OUT_MODEL (device=$DEV)"
+"$NEQUIP_COMPILE" "$OAM_ZIP" "$OUT_MODEL" --device "$DEV" --mode torchscript
+ls -lh "$OUT_MODEL"
+echo "[OK] compiled model"

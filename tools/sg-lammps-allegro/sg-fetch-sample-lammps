@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAMPLE_DIR="${TOOL_DIR}/sample"
-URL="${SG_LMP_SAMPLE_URL:-}"
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
+BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
+
 mkdir -p "$SAMPLE_DIR"
-[[ -n "$URL" ]] || { echo "[ERROR] SG_LMP_SAMPLE_URL not set" >&2; exit 2; }
-curl -fsSL "$URL" -o "$SAMPLE_DIR/sample.zip"
+command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
+command -v unzip >/dev/null 2>&1 || { echo "[ERROR] unzip not found" >&2; exit 2; }
+
+# 1) bundle sampleがあればコピー（オフライン対応）
+if [[ -d "$BUNDLE_ROOT/sample" ]] && ls "$BUNDLE_ROOT/sample"/* >/dev/null 2>&1; then
+  echo "[fetch] bundle sample -> $SAMPLE_DIR"
+  cp -a "$BUNDLE_ROOT/sample/." "$SAMPLE_DIR/"
+  echo "OK: placed sample from bundle"
+  exit 0
+fi
+
+# 2) ないならURLから取得（デフォルトはnotes）
+URL_DEFAULT="https://notes.server-gear.com/assets/downloads/lammps_allegro_llzo_50k_inputs_20260211.zip"
+URL="${SG_LMP_SAMPLE_URL:-$URL_DEFAULT}"
+
+echo "[fetch] $URL"
+curl -fL --retry 3 --retry-delay 2 "$URL" -o "$SAMPLE_DIR/sample.zip"
 unzip -o "$SAMPLE_DIR/sample.zip" -d "$SAMPLE_DIR" >/dev/null
-echo "[OK] sample placed into $SAMPLE_DIR"
+echo "OK: placed LAMMPS sample into $SAMPLE_DIR"
