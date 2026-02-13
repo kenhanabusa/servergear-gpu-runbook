@@ -1,0 +1,12 @@
+{
+  "id": "STK-016",
+  "version": "0.1.0",
+  "log_dir": "/var/log/sg-runbook",
+  "known_error_codes": [
+    "E_LMP_NOT_INSTALLED",
+    "E_LMP_SAMPLE_MISSING",
+    "E_MODEL_MISSING",
+    "E_DRIVER_OR_CUDA_MISMATCH",
+    "E_LMP_RUN_FAIL"
+  ]
+}

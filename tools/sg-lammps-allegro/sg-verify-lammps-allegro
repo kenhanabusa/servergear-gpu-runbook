@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+STK_ID="STK-016"
+STEP="LMPA_VERIFY"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$DIR/../_lib/sg_runbook_lib.sh"
+
+LOG_DIR="$(sg_pick_log_dir)"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_TXT="${LOG_DIR}/verify_lammps_allegro_${STK_ID}_${TS}.log"
+LOG_JSONL="${LOG_DIR}/${STK_ID}_${TS}.jsonl"
+
+APP_ROOT="/opt/sg/lammps-allegro"
+LMP_BIN="${LMP_BIN:-${APP_ROOT}/bin/lmp}"
+SAMPLE_DIR="${SAMPLE_DIR:-${DIR}/sample}"
+INP="${SAMPLE_DIR}/in.bench1_throughput"
+DATA="${SAMPLE_DIR}/llzo_51840.data"
+MODEL="${MODEL_PATH:-${SAMPLE_DIR}/model.nequip.pth}"
+
+sg_log "$LOG_TXT" "BEGIN ${STEP}"
+[[ -x "$LMP_BIN" ]] || sg_fail "E_LMP_NOT_INSTALLED" "lmp not found: install first" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+[[ -f "$INP" && -f "$DATA" ]] || sg_fail "E_LMP_SAMPLE_MISSING" "sample missing: run sg-fetch-sample-lammps" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+[[ -f "$MODEL" ]] || sg_fail "E_MODEL_MISSING" "model missing (doctor should suggest fetch-model)" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+
+sg_log "$LOG_TXT" "RUN: $LMP_BIN -in $INP"
+set +e
+"$LMP_BIN" -in "$INP" >>"$LOG_TXT" 2>&1
+rc=$?
+set -e
+[[ "$rc" == "0" ]] || sg_fail "E_LMP_RUN_FAIL" "LAMMPS failed rc=$rc" "$STEP" "$LOG_JSONL" "$LOG_TXT"
+sg_pass "LAMMPS input ran" "$STEP" "$LOG_JSONL" "$LOG_TXT"

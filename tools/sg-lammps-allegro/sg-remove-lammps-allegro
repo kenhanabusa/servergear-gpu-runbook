@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+APP_ROOT="/opt/sg/lammps-allegro"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/remove_lammps_allegro_STK-016_${TS}.log"
+log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
+[[ $EUID -eq 0 ]] || { log "ERROR: run as root"; exit 1; }
+log "BEGIN remove $APP_ROOT"
+rm -rf "$APP_ROOT" || true
+log "OK"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
+SAMPLE_DIR="${TOOL_DIR}/sample"
+URL="${SG_LMP_SAMPLE_URL:-}"
+mkdir -p "$SAMPLE_DIR"
+[[ -n "$URL" ]] || { echo "[ERROR] SG_LMP_SAMPLE_URL not set" >&2; exit 2; }
+curl -fsSL "$URL" -o "$SAMPLE_DIR/sample.zip"
+unzip -o "$SAMPLE_DIR/sample.zip" -d "$SAMPLE_DIR" >/dev/null
+echo "[OK] sample placed into $SAMPLE_DIR"

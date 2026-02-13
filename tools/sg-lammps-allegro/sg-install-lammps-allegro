@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+STK_ID="STK-016"
+APP_ROOT="/opt/sg/lammps-allegro"
+URL="${SG_LMP_ALLEGRO_URL:-}"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/install_lammps_allegro_${STK_ID}_${TS}.log"
+log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+mkdir -p "$APP_ROOT" || true
+[[ -n "$URL" ]] || die "SG_LMP_ALLEGRO_URL not set (provide distributable bundle URL)"
+command -v curl >/dev/null 2>&1 || { apt-get update -y; apt-get install -y curl; }
+command -v unzip >/dev/null 2>&1 || { apt-get update -y; apt-get install -y unzip; }
+log "FETCH: $URL"
+curl -fsSL "$URL" -o "$APP_ROOT/lmp.zip" >>"$LOG" 2>&1
+unzip -o "$APP_ROOT/lmp.zip" -d "$APP_ROOT" >>"$LOG" 2>&1
+log "OK"
