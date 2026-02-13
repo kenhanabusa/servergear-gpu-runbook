@@ -25,3 +25,8 @@ __pycache__/
 # STK-011: fetched samples (do not commit)
 tools/sg-qe-allegro-lammps-llzo/sample/llzo_51840.data
 tools/sg-qe-allegro-lammps-llzo/sample/model.nequip.pth
+
+# STK-016: do not commit samples/models/backups
+tools/sg-lammps-allegro/sample/
+tools/sg-lammps-allegro/*.bak.*
+tools/sg-lammps-allegro/**.bak.*
