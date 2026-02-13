@@ -22,6 +22,28 @@ VERIFY_MODE="${VERIFY_MODE:-infer}"          # infer|import-only
 PREFER_GPU="${PREFER_GPU:-1}"               # 1: GPU優先（cudaが無ければFAIL）
 FORCE_COMPILE="${FORCE_COMPILE:-0}"
 
+usage(){
+  cat <<EOF
+Usage: sg-verify-allegro [--infer] [--import-only] [-h|--help]
+Default: infer (model compile+load)
+Options:
+  --infer        run infer verification (default)
+  --import-only  only import checks (no model required)
+Env:
+  VERIFY_MODE=infer|import-only (optional; CLI takes priority)
+EOF
+}
+
+# CLI overrides (preferred)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --infer) VERIFY_MODE="infer"; shift ;;
+    --import-only) VERIFY_MODE="import-only"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
 sg_log "$LOG_TXT" "BEGIN ${STEP}"
 sg_log "$LOG_TXT" "log_dir=$LOG_DIR"
 sg_log "$LOG_TXT" "venv=$VENV"

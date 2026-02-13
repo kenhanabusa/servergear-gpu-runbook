@@ -4,12 +4,12 @@ IFS=$'\n\t'
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "[smoke] Phase A: import-only should PASS"
-VERIFY_MODE=import-only "$ROOT/sg-verify-allegro" | tail -n 40 || true
+"$ROOT/sg-verify-allegro" --import-only | tail -n 40 || true
 
 echo
-echo "[smoke] Phase B: infer should FAIL with E_MODEL_MISSING (no model) and doctor suggests fetch-model"
+echo "[smoke] Phase B: infer should FAIL with E_MODEL_MISSING when model missing; doctor suggests fetch-model"
 set +e
-VERIFY_MODE=infer "$ROOT/sg-verify-allegro" >/tmp/stk015_verify_B.out 2>&1
+"$ROOT/sg-verify-allegro" --infer >/tmp/stk015_verify_B.out 2>&1
 rc=$?
 set -e
 echo "[smoke] rcB=$rc"
