@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+STK_ID="STK-015"
+APP_ROOT="/opt/sg/allegro"
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/remove_allegro_${STK_ID}_${TS}.log"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes) shift ;;
+    -h|--help) echo "Usage: sudo sg-remove-allegro --yes"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
+[[ $EUID -eq 0 ]] || { log "ERROR: run as root"; exit 1; }
+
+log "BEGIN remove $APP_ROOT"
+rm -rf "$APP_ROOT" || true
+log "OK"

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+STK_ID="STK-015"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$DIR/../_lib/sg_runbook_lib.sh"
+
+pick_latest() { ls -1t "$1"/"${STK_ID}"_*.jsonl 2>/dev/null | head -n 1 || true; }
+latest="$(pick_latest /var/log/sg-runbook)"
+[[ -n "$latest" ]] || latest="$(pick_latest "$HOME/sg-runbook-log")"
+
+echo "[doctor] rid=${STK_ID}"
+echo "[doctor] latest_jsonl=${latest:-<none>}"
+
+if [[ -z "${latest:-}" ]]; then
+  echo "err=E_NO_LOG"
+  echo "next_cmds:"
+  echo "  - tools/sg-allegro/sg-verify-allegro"
+  exit 0
+fi
+
+eval "$(
+python3 - "$latest" <<'PY'
+import json,sys,shlex
+path=sys.argv[1]
+last={}
+for ln in open(path,'r',errors='ignore'):
+    ln=ln.strip()
+    if not ln: continue
+    try: obj=json.loads(ln)
+    except Exception: continue
+    if isinstance(obj,dict) and obj.get("type")!="result":
+        last=obj
+def q(x): return shlex.quote(str(x or ""))
+print("ERR="+q(last.get("err","")))
+print("HINT="+q(last.get("hint","")))
+PY
+)"
+echo "err=${ERR:-}"
+echo "hint=${HINT:-}"
+echo "next_cmds:"
+case "${ERR:-}" in
+  E_TORCH_MISSING)
+    echo "  - sudo tools/sg-allegro/sg-install-allegro --yes"
+    echo "  - tools/sg-allegro/sg-verify-allegro"
+    ;;
+  E_TORCH_CUDA_MISSING)
+    echo "  - (check NVIDIA driver + torch CUDA mismatch)"
+    ;;
+  E_MODEL_MISSING)
+    echo "  - tools/sg-allegro/sg-fetch-model-allegro (set MODEL_URL)"
+    echo "  - tools/sg-allegro/sg-verify-allegro"
+    ;;
+  E_ALLEGRO_IMPORT_FAIL)
+    echo "  - sudo tools/sg-allegro/sg-install-allegro --yes"
+    echo "  - tools/sg-allegro/sg-verify-allegro"
+    ;;
+  *)
+    echo "  - tools/sg-allegro/sg-verify-allegro"
+    ;;
+esac

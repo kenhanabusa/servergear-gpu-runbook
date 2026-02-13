@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+STK_ID="STK-015"
+APP_ROOT="/opt/sg/allegro"
+VENV="${APP_ROOT}/venv"
+
+LOG_DIR="/var/log/sg-runbook"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="${LOG_DIR}/install_allegro_${STK_ID}_${TS}.log"
+
+ASSUME_YES=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes) ASSUME_YES=1; shift ;;
+    -h|--help) echo "Usage: sudo sg-install-allegro --yes"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
+die(){ log "ERROR: $*"; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+
+mkdir -p "$APP_ROOT" || true
+log "BEGIN ALLEGRO_INSTALL venv=$VENV"
+
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
+python3 -m venv "$VENV"
+"$VENV/bin/python" -m pip install -U pip wheel setuptools >>"$LOG" 2>&1
+
+# v0.1: install torch (usually CPU build by default index). GPU torch selection is environment-dependent.
+"$VENV/bin/pip" install -U torch nequip >>"$LOG" 2>&1
+
+# Allegro (PyPI: nequip-allegro)
+"$VENV/bin/pip" install -U nequip-allegro >>"$LOG" 2>&1
+
+log "OK: installed torch + nequip-allegro into $VENV"

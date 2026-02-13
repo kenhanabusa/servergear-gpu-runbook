@@ -1,0 +1,18 @@
+{
+  "id": "STK-015",
+  "version": "0.1.0",
+  "log_dir": "/var/log/sg-runbook",
+  "steps": [
+    {"step_id": "ALLEGRO_INSTALL", "rc_ok": 0, "rc_skip": 20, "rc_fail": 40},
+    {"step_id": "ALLEGRO_VERIFY",  "rc_ok": 0, "rc_skip": 20, "rc_fail": 40},
+    {"step_id": "ALLEGRO_REMOVE",  "rc_ok": 0, "rc_skip": 20, "rc_fail": 40}
+  ],
+  "known_error_codes": [
+    "E_ALLEGRO_IMPORT_FAIL",
+    "E_TORCH_MISSING",
+    "E_TORCH_CUDA_MISSING",
+    "E_DRIVER_TOO_OLD",
+    "E_MODEL_MISSING",
+    "E_INFER_FAIL"
+  ]
+}
