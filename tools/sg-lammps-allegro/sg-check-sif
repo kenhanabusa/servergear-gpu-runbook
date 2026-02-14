@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+STK_ID="STK-016"
+LOG_DIR_PRIMARY="/var/log/sg-runbook"
+LOG_DIR_FALLBACK="${HOME}/sg-runbook-log"
+LOG_DIR="$LOG_DIR_PRIMARY"
+mkdir -p "$LOG_DIR" 2>/dev/null || { LOG_DIR="$LOG_DIR_FALLBACK"; mkdir -p "$LOG_DIR"; }
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_TXT="${LOG_DIR}/check_sif_${STK_ID}_${TS}.log"
+
+log(){ local s="[$(date -Is)] $*"; echo "$s" | tee -a "$LOG_TXT"; }
+
+SIF="${SIF:-/opt/containers/sg-lammps-allegro.sif}"
+USE_NV="${USE_NV:-auto}"         # auto|0|1
+MODEL="${MODEL:-}"               # optional: compiled model path
+WORK="${WORK:-/var/tmp/sg-runbook/sif-check-${TS}}"
+KEEP="${KEEP:-0}"
+
+usage(){
+  cat <<EOF
+Usage: sg-check-sif [--sif PATH] [--nv auto|0|1] [--model PATH] [--keep]
+Checks:
+  - lmp exists and *can start* (lmp -h)
+  - ldd has no "not found"
+  - pair_style allegro recognized
+  - (optional) model-format mismatch (nequip-deploy hint)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sif) SIF="${2:-}"; shift 2;;
+    --nv) USE_NV="${2:-auto}"; shift 2;;
+    --model) MODEL="${2:-}"; shift 2;;
+    --keep) KEEP=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+command -v apptainer >/dev/null 2>&1 || { log "FAIL: apptainer not found"; exit 40; }
+[[ -f "$SIF" ]] || { log "FAIL: SIF missing: $SIF"; exit 40; }
+
+NV_FLAG=""
+if [[ "$USE_NV" == "1" ]]; then NV_FLAG="--nv"; fi
+if [[ "$USE_NV" == "auto" ]]; then command -v nvidia-smi >/dev/null 2>&1 && NV_FLAG="--nv" || true; fi
+
+mkdir -p "$WORK"
+trap '[[ "$KEEP" == "1" ]] || rm -rf "$WORK" 2>/dev/null || true' EXIT
+
+log "BEGIN sg-check-sif"
+log "sif=$SIF"
+log "nv=${NV_FLAG:-<none>}"
+log "work=$WORK"
+log "model=${MODEL:-<none>}"
+
+# Helper: pick LMP path inside container
+pick_lmp='
+LMP=""
+for c in /opt/lammps/install/bin/lmp /opt/lammps/bin/lmp /usr/local/bin/lmp /usr/bin/lmp; do
+  [ -x "$c" ] && LMP="$c" && break
+done
+[ -n "$LMP" ] || { echo "E_LMP_NOT_FOUND"; exit 40; }
+echo "$LMP"
+'
+
+# 1) lmp exists
+LMP_PATH="$(apptainer exec --cleanenv ${NV_FLAG} "$SIF" bash -lc "$pick_lmp" 2>/dev/null || true)"
+if [[ -z "$LMP_PATH" ]]; then
+  log "FAIL: lmp not found in SIF"
+  exit 40
+fi
+log "LMP=$LMP_PATH"
+
+# 2) ldd not found check (hard fail)
+out_ldd="$(apptainer exec --cleanenv ${NV_FLAG} "$SIF" bash -lc "ldd '$LMP_PATH' 2>&1 | egrep 'not found' || true")"
+if [[ -n "$out_ldd" ]]; then
+  echo "$out_ldd" | tee -a "$LOG_TXT" >/dev/null
+  log "FAIL: missing shared libraries (ldd shows not found)"
+  exit 40
+fi
+log "OK: ldd has no missing libs"
+
+# 3) lmp must start (hard fail)
+# IMPORTANT: avoid pipelines that hide exit codes
+out_help="$(apptainer exec --cleanenv ${NV_FLAG} "$SIF" bash -lc "set -e; '$LMP_PATH' -h >/tmp/lmp_help.txt 2>&1; head -n 10 /tmp/lmp_help.txt" 2>&1 || true)"
+# re-run to get rc exactly
+set +e
+apptainer exec --cleanenv ${NV_FLAG} "$SIF" bash -lc "set -e; '$LMP_PATH' -h >/tmp/lmp_help.txt 2>&1" >/dev/null 2>&1
+rc_help=$?
+set -e
+echo "$out_help" | tee -a "$LOG_TXT" >/dev/null
+if [[ "$rc_help" != "0" ]]; then
+  log "FAIL: lmp -h failed to start (rc=$rc_help)"
+  exit 40
+fi
+log "OK: lmp starts (lmp -h)"
+
+# 4) pair_style allegro recognized (no model required)
+cat > "$WORK/in_pair_style.in" <<'EOF'
+units metal
+atom_style atomic
+boundary p p p
+lattice fcc 1.0
+region box block 0 1 0 1 0 1
+create_box 1 box
+create_atoms 1 single 0.0 0.0 0.0
+mass 1 1.0
+pair_style allegro
+pair_coeff * * dummy.pth X
+run 0
+EOF
+
+set +e
+out2="$(apptainer exec --cleanenv ${NV_FLAG} --bind "$WORK:/work" "$SIF" bash -lc "set -e; '$LMP_PATH' -in /work/in_pair_style.in 2>&1 | tail -n 60" 2>&1)"
+rc2=$?
+set -e
+echo "$out2" | tee -a "$LOG_TXT" >/dev/null
+
+if echo "$out2" | grep -qi "Unknown pair_style allegro"; then
+  log "FAIL: pair_style allegro not available"
+  exit 40
+fi
+log "OK: pair_style allegro recognized (or moved past it)"
+
+# 5) model-format mismatch check (optional)
+if [[ -n "${MODEL:-}" && -f "${MODEL}" ]]; then
+  cp -a "$MODEL" "$WORK/model.nequip.pth"
+  cat > "$WORK/in_model_check.in" <<'EOF'
+units metal
+atom_style atomic
+boundary p p p
+lattice fcc 1.0
+region box block 0 1 0 1 0 1
+create_box 1 box
+create_atoms 1 single 0.0 0.0 0.0
+mass 1 1.0
+pair_style allegro
+pair_coeff * * model.nequip.pth X
+run 0
+EOF
+  set +e
+  out3="$(apptainer exec --cleanenv ${NV_FLAG} --bind "$WORK:/work" "$SIF" bash -lc "set -e; '$LMP_PATH' -in /work/in_model_check.in 2>&1 | tail -n 120" 2>&1)"
+  rc3=$?
+  set -e
+  echo "$out3" | tee -a "$LOG_TXT" >/dev/null
+  if echo "$out3" | grep -qi "nequip-deploy"; then
+    log "FAIL: model format mismatch (this SIF expects nequip-deploy style models)"
+    exit 40
+  fi
+  log "OK: no nequip-deploy mismatch detected (not a proof of full run)"
+else
+  log "SKIP: model-format check (no MODEL provided)"
+fi
+
+# 6) optional GPU sanity (warn only)
+if [[ -n "${NV_FLAG:-}" ]]; then
+  set +e
+  out4="$(apptainer exec --cleanenv --nv "$SIF" bash -lc 'nvidia-smi -L 2>&1 | head -n 5' 2>&1)"
+  rc4=$?
+  set -e
+  echo "$out4" | tee -a "$LOG_TXT" >/dev/null
+  if [[ "$rc4" != "0" ]] || echo "$out4" | grep -qiE "unsupported display driver|cuda driver combination|Error 803"; then
+    log "WARN: GPU visibility/driver mismatch inside SIF (cpu-only verify may still work)"
+  else
+    log "OK: nvidia-smi works in SIF"
+  fi
+fi
+
+log "PASS: SIF basic checks OK"
+log "log=$LOG_TXT"
+exit 0
