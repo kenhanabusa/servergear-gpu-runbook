@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sg-lib.sh
+source "$HERE/sg-lib.sh"
+
+PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
+LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
+mkdirp "$LOGDIR"
+
+log "PREFIX=$PREFIX"
+log "WORKDIR=$WORKDIR"
+log "LOGDIR=$LOGDIR"
+
+# Quick checks
+msgs=()
+next=()
+
+if ! command -v nvcc >/dev/null 2>&1; then
+  msgs+=("nvcc がありません（CUDA toolkit）。")
+  next+=("CUDA toolkit を利用可能にする（module等）")
+fi
+
+if ! command -v nvc >/dev/null 2>&1; then
+  msgs+=("nvc がありません（NVHPC）。")
+  next+=("module load nvhpc 等で nvc をPATHに入れる / 管理者にNVHPC導入依頼")
+fi
+
+QE_VER="${QE_VER:-7.5}"
+PW="${PREFIX}/qe-${QE_VER}/bin/pw.x"
+if [ ! -x "$PW" ]; then
+  msgs+=("pw.x が見つかりません（未install）。")
+  next+=("PREFIX=$PREFIX $HERE/sg-install-qe-gpu-src-u")
+else
+  msgs+=("pw.x OK: $PW")
+  next+=("PREFIX=$PREFIX $HERE/sg-verify-qe-gpu-src-u --single")
+fi
+
+if [ -f "${WORKDIR}/inputs/pseudos/Si.pz-vbc.UPF" ]; then
+  msgs+=("pseudo OK: inputs/pseudos/Si.pz-vbc.UPF")
+else
+  msgs+=("pseudo がありません: ${WORKDIR}/inputs/pseudos/Si.pz-vbc.UPF")
+  next+=("Si.pz-vbc.UPF を ${WORKDIR}/inputs/pseudos/ に置く")
+fi
+
+echo "=== Doctor ($TOOL_NAME) ==="
+for m in "${msgs[@]}"; do echo "- $m"; done
+echo
+echo "Next:"
+for n in "${next[@]}"; do echo "  $n"; done
+
+doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "ok" "doctor" "doctor表示" "$(printf "%s\n" "${next[@]}")"

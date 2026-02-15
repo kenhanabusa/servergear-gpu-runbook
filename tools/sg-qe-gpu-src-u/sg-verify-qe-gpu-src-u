@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sg-lib.sh
+source "$HERE/sg-lib.sh"
+
+PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
+LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
+MODE="${1:-}"
+
+safe_prefix_or_die "$PREFIX"
+mkdirp "$WORKDIR" "$LOGDIR"
+
+QE_VER="${QE_VER:-7.5}"
+INSTALL_DIR="${PREFIX}/qe-${QE_VER}"
+PW="${INSTALL_DIR}/bin/pw.x"
+
+if [ ! -x "$PW" ]; then
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "verify" "pw.x が見つかりません（install未実行の可能性）。" "PREFIX=$PREFIX $HERE/sg-install-qe-gpu-src-u"
+  die "$EC_ACTION" "pw.x not found"
+fi
+
+# inputs (portable)
+INPUT_DIR="${WORKDIR}/inputs"
+PSEUDO_DIR="${INPUT_DIR}/pseudos"
+mkdirp "$INPUT_DIR" "$PSEUDO_DIR"
+
+# minimal input (Si SCF)
+cat > "$INPUT_DIR/si_scf_np1.in" <<'EOF'
+&control
+  calculation='scf',
+  prefix='si',
+  pseudo_dir='./pseudos',
+  outdir='./tmp'
+/
+&system
+  ibrav=2, celldm(1)=10.2, nat=2, ntyp=1,
+  ecutwfc=30.0
+/
+&electrons
+  conv_thr=1.0d-8
+/
+ATOMIC_SPECIES
+ Si 28.0855 Si.pz-vbc.UPF
+ATOMIC_POSITIONS (alat)
+ Si 0.00 0.00 0.00
+ Si 0.25 0.25 0.25
+K_POINTS automatic
+ 2 2 2 0 0 0
+EOF
+
+# NOTE: provide a placeholder UPF (user must supply real UPF)
+# We intentionally do NOT download UPF automatically in user-mode.
+if [ ! -f "$PSEUDO_DIR/Si.pz-vbc.UPF" ]; then
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "verify" "擬ポテンシャルがありません: $PSEUDO_DIR/Si.pz-vbc.UPF" \
+    "対処：Si.pz-vbc.UPF を $PSEUDO_DIR に配置してください（学内の既存pseudoを利用可）"
+  die "$EC_ACTION" "missing UPF"
+fi
+
+cd "$INPUT_DIR"
+
+run_single() {
+  log "Running single..."
+  /usr/bin/time -f "WALL %e" -o "$LOGDIR/verify_single_wall.txt" \
+    "$PW" -in si_scf_np1.in \
+    2>&1 | tee "$LOGDIR/verify_single.log"
+  cat "$LOGDIR/verify_single_wall.txt" >&2
+}
+
+run_multi() {
+  # Multi here means MPI ranks; GPU parallel depends on QE build/options
+  NP="${NP:-4}"
+  if ! command -v mpirun >/dev/null 2>&1; then
+    doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "verify" "mpirun が見つかりません（multi不可）。" "singleで検収 or 管理者にMPI提供依頼"
+    die "$EC_ACTION" "mpirun not found"
+  fi
+  log "Running multi (mpirun -np $NP)..."
+  /usr/bin/time -f "WALL %e" -o "$LOGDIR/verify_multi_wall_np${NP}.txt" \
+    mpirun -np "$NP" "$PW" -in si_scf_np1.in \
+    2>&1 | tee "$LOGDIR/verify_multi_np${NP}.log"
+  cat "$LOGDIR/verify_multi_wall_np${NP}.txt" >&2
+}
+
+case "$MODE" in
+  --single) run_single ;;
+  --multi) run_multi ;;
+  *)
+    echo "Usage: $0 --single|--multi" >&2
+    exit "$EC_ACTION"
+    ;;
+esac
+
+doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "ok" "verify" "verify完了" ""
+exit "$EC_OK"

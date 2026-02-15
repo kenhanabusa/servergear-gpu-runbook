@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- dry-run flag (must be non-destructive) ---
+DRY_RUN=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run|--dryrun|-n) DRY_RUN=1 ;;
+  esac
+done
+
+# --- safe rm wrapper (refuse dangerous paths) ---
+sg_safe_rm_tree() {
+  local target="$1"
+  local prefix="$2"
+
+  # resolve paths (Ubuntu: coreutils realpath is available)
+  local t p
+  t="$(realpath -m -- "$target")"
+  p="$(realpath -m -- "$prefix")"
+
+  if [[ -z "$t" || "$t" == "/" ]]; then
+    echo "FATAL: refuse to remove empty or /" >&2
+    return 2
+  fi
+  if [[ "$t" == "$p" ]]; then
+    echo "FATAL: refuse to remove PREFIX itself: $t" >&2
+    return 2
+  fi
+  if [[ "$t" != "$p/"* ]]; then
+    echo "FATAL: refuse to remove outside PREFIX: target=$t prefix=$p" >&2
+    return 2
+  fi
+
+  if (( DRY_RUN )); then
+    echo "[DRY-RUN] would remove: $t"
+    return 0
+  fi
+
+  rm -rf -- "$t"
+}
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sg-lib.sh
+source "$HERE/sg-lib.sh"
+
+PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
+LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
+
+safe_prefix_or_die "$PREFIX"
+mkdirp "$LOGDIR"
+
+QE_VER="${QE_VER:-7.5}"
+TARGET="${PREFIX}/qe-${QE_VER}"
+
+if [ ! -d "$TARGET" ]; then
+  log "Nothing to remove: $TARGET"
+  exit "$EC_OK"
+fi
+
+if ((DRY_RUN)); then
+  log "[DRY-RUN] would remove: $TARGET"
+else
+  log "Removing: $TARGET"
+fi
+sg_safe_rm_tree "$TARGET" "$PREFIX"
+
+doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "ok" "remove" "削除完了" ""
+exit "$EC_OK"

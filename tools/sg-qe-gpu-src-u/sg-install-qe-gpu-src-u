@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sg-lib.sh
+source "$HERE/sg-lib.sh"
+
+PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
+LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
+JOBS="${JOBS:-$DEFAULT_JOBS}"
+
+safe_prefix_or_die "$PREFIX"
+mkdirp "$WORKDIR" "$LOGDIR"
+
+log "PREFIX=$PREFIX"
+log "WORKDIR=$WORKDIR"
+log "LOGDIR=$LOGDIR"
+
+# deps check
+if ! command -v git >/dev/null 2>&1; then
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "deps" "git が見つかりません。" "sudo apt install git など"
+  die "$EC_ACTION" "git not found"
+fi
+
+if ! detect_nvcc >/dev/null 2>&1; then
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "deps" "nvcc が見つかりません（CUDA toolkit）。" "CUDA toolkit を利用可能な環境（module等）にする / 管理者に導入依頼"
+  die "$EC_ACTION" "nvcc not found"
+fi
+
+NVCC="$(detect_nvcc)"
+log "nvcc=$NVCC"
+
+# NVHPC is preferred
+NVHPC_BIN=""
+if NVHPC_BIN="$(detect_nvhpc 2>/dev/null)"; then
+  log "NVHPC found: $NVHPC_BIN"
+else
+  # For now, we require NVHPC for STK-014-U (can add GNU route later)
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "deps" "NVHPC(nvc) が見つかりません。" "1) module load nvhpc などで nvc をPATHに入れる\n2) もしくは管理者にNVHPC導入依頼\n3) GNU+CUDA ルートは次版で提供予定"
+  die "$EC_ACTION" "NVHPC (nvc) not found"
+fi
+
+export PATH="$NVHPC_BIN:$PATH"
+
+# fetch QE source (v7.5)
+QE_VER="${QE_VER:-7.5}"
+QE_TAG="qe-${QE_VER}"
+SRC_DIR="${WORKDIR}/qe-src"
+BUILD_DIR="${WORKDIR}/qe-build"
+INSTALL_DIR="${PREFIX}/qe-${QE_VER}"
+
+log "QE_VER=$QE_VER (tag=$QE_TAG)"
+log "SRC_DIR=$SRC_DIR"
+log "BUILD_DIR=$BUILD_DIR"
+log "INSTALL_DIR=$INSTALL_DIR"
+
+if [ ! -d "$SRC_DIR/.git" ]; then
+  log "Cloning QE source..."
+  rm -rf "$SRC_DIR"
+  git clone --depth 1 --branch "$QE_TAG" https://gitlab.com/QEF/q-e.git "$SRC_DIR" \
+    2>&1 | tee "$LOGDIR/clone.log"
+else
+  log "QE source already present (skip clone)"
+fi
+
+mkdirp "$BUILD_DIR"
+cd "$SRC_DIR"
+
+# configure & build (minimal)
+log "Configuring..."
+cat > "$LOGDIR/env.txt" <<EOF
+$(ts)
+nvcc: $NVCC
+nvc: $(command -v nvc)
+nvc --version:
+$(nvc --version 2>&1 || true)
+EOF
+
+# QE build is complex; we provide a conservative baseline:
+# - build pw.x only
+# - user install under PREFIX
+# You may need to tune flags per environment.
+log "Building (baseline)..."
+./configure --prefix="$INSTALL_DIR" \
+  2>&1 | tee "$LOGDIR/configure.log"
+
+make -j "$JOBS" pw \
+  2>&1 | tee "$LOGDIR/make_pw.log"
+
+make install \
+  2>&1 | tee "$LOGDIR/make_install.log"
+
+# smoke check
+PW="$INSTALL_DIR/bin/pw.x"
+if [ ! -x "$PW" ]; then
+  doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "install" "pw.x が生成されていません。" "tail -n 200 $LOGDIR/make_pw.log"
+  die "$EC_INTERNAL" "pw.x missing after install"
+fi
+
+doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "ok" "install" "インストール完了" "PREFIX=$PREFIX $HERE/sg-verify-qe-gpu-src-u --single"
+log "OK: installed pw.x at $PW"

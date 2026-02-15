@@ -30,3 +30,6 @@ tools/sg-qe-allegro-lammps-llzo/sample/model.nequip.pth
 tools/sg-lammps-allegro/sample/
 tools/sg-lammps-allegro/*.bak.*
 tools/sg-lammps-allegro/**.bak.*
+
+# temp backups
+*.bak.*
