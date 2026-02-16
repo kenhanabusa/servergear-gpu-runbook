@@ -33,3 +33,8 @@ tools/sg-lammps-allegro/**.bak.*
 
 # temp backups
 *.bak.*
+
+# local backups (generated during ops / crun)
+tools/**/*.bak.*
+tools/**/*.before-*
+tools/**/*~
