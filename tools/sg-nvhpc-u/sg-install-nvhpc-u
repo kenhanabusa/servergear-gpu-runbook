@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOL="sg-install-nvhpc-u"
+ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
+log(){ echo "[$(ts)] [$TOOL] $*" >&2; }
+die(){ local c="$1"; shift; log "ERROR: $*"; exit "$c"; }
+
+FETCH_URL="${NVHPC_FETCH_URL:-https://notes.server-gear.com/assets/downloads/nvhpc_fetch_linux_x86_64.sh}"
+PREFIX="${NVHPC_PREFIX:-$HOME/.local/sg/nvhpc}"
+MODE="${NVHPC_MODE:-install}"
+
+# Explicit EULA consent required
+: "${NVHPC_ACCEPT_LICENSE:=}"
+if [ "${NVHPC_ACCEPT_LICENSE}" != "YES" ]; then
+  die 20 "EULA not accepted. Run with: NVHPC_ACCEPT_LICENSE=YES $0"
+fi
+
+mkdir -p "$PREFIX" "$HOME/.cache/sg/nvhpc" "$HOME/.cache/sg/nvhpc_work"
+
+log "FETCH_URL=$FETCH_URL"
+log "PREFIX=$PREFIX"
+log "MODE=$MODE"
+log "Installing NVHPC (user-space) via notes fetch script..."
+
+# Run fetch script (it handles URL + install). We pass install settings via env vars.
+export NVHPC_ACCEPT_LICENSE=YES
+export NVHPC_MODE="$MODE"
+export NVHPC_CACHE_DIR="$HOME/.cache/sg/nvhpc"
+export NVHPC_WORK_DIR="$HOME/.cache/sg/nvhpc_work"
+export NVHPC_INSTALL_DIR="$PREFIX"
+export NVHPC_INSTALL_TYPE="${NVHPC_INSTALL_TYPE:-single}"   # avoid auto on shared env
+export NVHPC_SILENT="${NVHPC_SILENT:-true}"
+
+if command -v curl >/dev/null 2>&1; then
+  bash <(curl -fsSL "$FETCH_URL")
+else
+  wget -qO- "$FETCH_URL" | bash
+fi
+
+# Source env for current shell
+ENV_SH="$PREFIX/env.sh"
+if [ ! -f "$ENV_SH" ]; then
+  die 40 "NVHPC env not found: $ENV_SH"
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_SH"
+
+log "NVHPC ready:"
+which nvc || true
+which nvfortran || true
+which mpirun || true
+nvc --version | head -n 2 || true
+mpirun --version | head -n 2 || true
+
+log "OK. Next: run QE user build with sg-qe-gpu-src-u."

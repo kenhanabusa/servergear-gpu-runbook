@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TOOL="sg-doctor-nvhpc-u"
+ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
+log(){ echo "[$(ts)] [$TOOL] $*" >&2; }
+
+PREFIX="${NVHPC_PREFIX:-$HOME/.local/sg/nvhpc}"
+FETCH_URL="${NVHPC_FETCH_URL:-https://notes.server-gear.com/assets/downloads/nvhpc_fetch_linux_x86_64.sh}"
+
+echo "=== Doctor ($TOOL) ==="
+echo "- PREFIX: $PREFIX"
+echo "- FETCH_URL: $FETCH_URL"
+echo
+
+# noexec quick check
+tmp="$HOME/._exec_test.$$"
+echo -e '#!/bin/sh\necho EXEC_OK' > "$tmp"
+chmod +x "$tmp" || true
+if "$tmp" >/dev/null 2>&1; then
+  echo "- HOME exec: OK"
+else
+  echo "- HOME exec: NG (noexec?) -> use writable+executable path (e.g. /tmp or /work)"
+fi
+rm -f "$tmp"
+
+# tools
+echo "- curl: $(command -v curl 2>/dev/null || echo NG)"
+echo "- wget: $(command -v wget 2>/dev/null || echo NG)"
+echo "- gcc : $(command -v gcc  2>/dev/null || echo NG)"
+echo "- g++ : $(command -v g++  2>/dev/null || echo NG)"
+echo "- gfortran: $(command -v gfortran 2>/dev/null || echo NG)"
+echo
+
+if [ -f "$PREFIX/env.sh" ]; then
+  echo "- NVHPC env.sh: OK ($PREFIX/env.sh)"
+else
+  echo "- NVHPC env.sh: not found (install needed)"
+  echo
+  echo "Next:"
+  echo "  NVHPC_ACCEPT_LICENSE=YES tools/sg-nvhpc-u/sg-install-nvhpc-u"
+fi
