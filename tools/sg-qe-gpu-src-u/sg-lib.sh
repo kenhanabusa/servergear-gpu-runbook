@@ -76,3 +76,16 @@ rec = {
 print(json.dumps(rec, ensure_ascii=False))
 PY
 }
+
+
+# Auto-detect NVHPC user install env and source it (no-op if absent)
+source_nvhpc_env_if_present() {
+  local env="${NVHPC_ENV_SH:-$HOME/.local/sg/nvhpc/env.sh}"
+  if [ -f "$env" ]; then
+    # shellcheck disable=SC1090
+    source "$env"
+    return 0
+  fi
+  return 1
+}
+

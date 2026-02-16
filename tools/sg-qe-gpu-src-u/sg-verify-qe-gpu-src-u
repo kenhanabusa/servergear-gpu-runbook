@@ -50,6 +50,34 @@ K_POINTS automatic
  2 2 2 0 0 0
 EOF
 
+cat > "$INPUT_DIR/si_scale.in" <<'EOF'
+&CONTROL
+  calculation='scf',
+  prefix='si',
+  outdir = './tmp',
+  pseudo_dir = './pseudos',
+/
+&SYSTEM
+  ibrav=2, celldm(1)=10.26,
+  nat=2, ntyp=1,
+  ecutwfc=80.0, ecutrho=640.0,
+  nbnd=200,
+  occupations='smearing', smearing='mp', degauss=0.02,
+/
+&ELECTRONS
+  conv_thr=1.0d-7,
+  mixing_beta=0.7,
+  diagonalization='david',
+/
+ATOMIC_SPECIES
+  Si  28.0855  Si.pz-vbc.UPF
+ATOMIC_POSITIONS (alat)
+  Si 0.00 0.00 0.00
+  Si 0.25 0.25 0.25
+K_POINTS (automatic)
+  12 12 12  0 0 0
+EOF
+
 # NOTE: provide a placeholder UPF (user must supply real UPF)
 # We intentionally do NOT download UPF automatically in user-mode.
 if [ ! -f "$PSEUDO_DIR/Si.pz-vbc.UPF" ]; then
@@ -61,9 +89,29 @@ fi
 cd "$INPUT_DIR"
 
 run_single() {
+  # NOTE: この pw.x は configure で MPI 有効になっているため、np=1 でも mpirun 経由が必須。
+  if ! command -v mpirun >/dev/null 2>&1; then
+    doctor_record "$PREFIX" "$WORKDIR" "$LOGDIR" "err" "verify" \
+      "mpirun が見つかりません（MPI版 pw.x は -np 1 でも mpirun 必須）" \
+      "NVHPC(HPC SDK) の MPI を有効化するか、管理者に MPI 提供を依頼"
+    die "$EC_ACTION" "mpirun not found"
+  fi
+
+  # OpenMPI の help file 探索パスが壊れている環境向け（NVHPC/HPC-X等）
+  # mpirun の prefix から OPAL_PREFIX を推定してセットする（既に設定済みなら何もしない）
+  if [ -z "${OPAL_PREFIX:-}" ]; then
+    mp="$(command -v mpirun || true)"
+    if [ -n "$mp" ]; then
+      mp_real="$(readlink -f "$mp" 2>/dev/null || echo "$mp")"
+      prefix="$(dirname "$(dirname "$mp_real")")"
+      if [ -f "$prefix/share/openmpi/help-opal-runtime.txt" ]; then
+        export OPAL_PREFIX="$prefix"
+      fi
+    fi
+  fi
   log "Running single..."
   /usr/bin/time -f "WALL %e" -o "$LOGDIR/verify_single_wall.txt" \
-    "$PW" -in si_scf_np1.in \
+    mpirun -np 1 "$PW" -in si_scf_np1.in \
     2>&1 | tee "$LOGDIR/verify_single.log"
   cat "$LOGDIR/verify_single_wall.txt" >&2
 }
@@ -76,8 +124,9 @@ run_multi() {
     die "$EC_ACTION" "mpirun not found"
   fi
   log "Running multi (mpirun -np $NP)..."
+  log "Using input (multi): si_scale.in"
   /usr/bin/time -f "WALL %e" -o "$LOGDIR/verify_multi_wall_np${NP}.txt" \
-    mpirun -np "$NP" "$PW" -in si_scf_np1.in \
+    mpirun -np "$NP" "$PW" -ndiag "${NDIAG:-1}" -in si_scale.in \
     2>&1 | tee "$LOGDIR/verify_multi_np${NP}.log"
   cat "$LOGDIR/verify_multi_wall_np${NP}.txt" >&2
 }
