@@ -57,10 +57,29 @@ check_pwx_or_skip
 
 # v0.1: 実行は任意（SG_RUN=1のみ）
 if [ "${SG_RUN:-0}" != "1" ]; then
-  sg_pass "QE preflight OK. Set SG_RUN=1 to actually run pw.x -in ..." "$STEP" "pw.x -in $INP"
+  sg_pass "QE preflight OK. Set SG_RUN=1 to actually run: mpirun -np 1 pw.x -in ... (QE_NP/QE_TIMEOUT/QE_MPIRUN override)" "$STEP" "mpirun -np 1 pw.x -in $INP"
   exit 0
 fi
 
 sg_log "RUN: pw.x -in $INP"
-pw.x -in "$INP" 2>&1 | tee -a "$SG_LOG_TXT"
-sg_pass "pw.x finished (check output manually for now)." "$STEP" "pw.x -in $INP"
+MPIRUN="${QE_MPIRUN:-$(command -v mpirun 2>/dev/null || true)}"
+if [[ -z "${MPIRUN}" ]]; then
+  sg_skip "mpirun not found; MPI-enabled pw.x may hang if launched directly. Provide MPI or run with SG_RUN=0." "$STEP" "E_MPI_NOT_FOUND" "command -v mpirun"
+  exit 0
+fi
+
+# If OPAL_PREFIX is unset, infer it from mpirun prefix so Open MPI can find help/runtime files.
+if [[ -z "${OPAL_PREFIX:-}" ]]; then
+  mp="$(readlink -f "${MPIRUN}" 2>/dev/null || echo "${MPIRUN}")"
+  prefix="$(cd "$(dirname "$mp")/.." && pwd -P)"
+  if [[ -r "${prefix}/share/openmpi/help-opal-runtime.txt" ]]; then
+    export OPAL_PREFIX="$prefix"
+  fi
+fi
+
+QE_NP="${QE_NP:-1}"
+QE_TIMEOUT="${QE_TIMEOUT:-60s}"
+
+sg_log "RUN: timeout ${QE_TIMEOUT} ${MPIRUN} -np ${QE_NP} ${PWX} -in $INP"
+timeout "${QE_TIMEOUT}" "${MPIRUN}" -np "${QE_NP}" "${PWX}" -in "$INP" 2>&1 | tee -a "$SG_LOG_TXT"
+sg_pass "pw.x finished (mpirun)." "$STEP" "mpirun -np ${QE_NP:-1} pw.x -in $INP"
