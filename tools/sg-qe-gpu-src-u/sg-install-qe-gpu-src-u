@@ -81,6 +81,23 @@ EOF
 # - user install under PREFIX
 # You may need to tune flags per environment.
 log "Building (baseline)..."
+# --- GPU build knobs (injected) ---
+# Override if needed:
+#   CUDA_HOME=/path/to/cuda   CUDA_CC=80   CUDA_RUNTIME=13.1
+CUDA_HOME="${CUDA_HOME:-${NVHPC_CUDA_HOME:-}}"
+if [ -z "${CUDA_HOME}" ]; then
+  if command -v nvcc >/dev/null 2>&1; then
+    CUDA_HOME="$(cd "$(dirname "$(command -v nvcc)")/.." && pwd -P)"
+  fi
+fi
+CUDA_CC="${CUDA_CC:-80}"          # A100=80, H100=90
+CUDA_RUNTIME="${CUDA_RUNTIME:-13.1}"
+if [ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}/lib64" ]; then
+  export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+else
+  echo "[WARN] CUDA_HOME not resolved; GPU configure may fall back to CPU build." >&2
+fi
+
 ./configure --prefix="$INSTALL_DIR" \
   2>&1 | tee "$LOGDIR/configure.log"
 
