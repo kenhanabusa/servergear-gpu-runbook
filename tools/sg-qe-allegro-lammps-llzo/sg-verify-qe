@@ -61,7 +61,7 @@ if [ "${SG_RUN:-0}" != "1" ]; then
   exit 0
 fi
 
-sg_log "RUN: pw.x -in $INP"
+sg_log "RUN: preparing mpirun pw.x (MPI build; direct launch may hang)"
 MPIRUN="${QE_MPIRUN:-$(command -v mpirun 2>/dev/null || true)}"
 if [[ -z "${MPIRUN}" ]]; then
   sg_skip "mpirun not found; MPI-enabled pw.x may hang if launched directly. Provide MPI or run with SG_RUN=0." "$STEP" "E_MPI_NOT_FOUND" "command -v mpirun"
