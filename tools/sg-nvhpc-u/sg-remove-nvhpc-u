@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOL="sg-remove-nvhpc-u"
+ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
+log(){ echo "[$(ts)] [$TOOL] $*" >&2; }
+die(){ log "ERROR: $*"; exit 1; }
+
+usage() {
+  cat <<USAGE
+Usage:
+  $TOOL [--dry-run] [--purge] [--purge-cache] [--yes]
+
+Behavior:
+  - default: move PREFIX to TRASH (non-destructive)
+  - --purge: delete PREFIX (rm -rf)
+  - --purge-cache: also delete CACHE_DIR (incl. tarball/unpack)
+  - --dry-run: print what would be done (no changes)
+  - --yes: do not prompt (dangerous with --purge/--purge-cache)
+
+Env (compatible with existing scripts):
+  PREFIX         default: \$HOME/.local/sg/nvhpc
+  NVHPC_PREFIX   alias for PREFIX (doctor uses this)
+  CACHE_DIR      default: \$HOME/.cache/sg/nvhpc
+  TRASH          default: \$HOME/.local/sg/_trash
+USAGE
+}
+
+DRY_RUN=0
+PURGE=0
+PURGE_CACHE=0
+YES=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    --purge) PURGE=1; shift ;;
+    --purge-cache) PURGE_CACHE=1; shift ;;
+    -y|--yes) YES=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown arg: $1 (use --help)" ;;
+  esac
+done
+
+# Defaults (match sg-install-nvhpc-u + sg-doctor-nvhpc-u)
+PREFIX="${PREFIX:-${NVHPC_PREFIX:-$HOME/.local/sg/nvhpc}}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/sg/nvhpc}"
+TRASH="${TRASH:-$HOME/.local/sg/_trash}"
+
+# Resolve paths for safety checks (best-effort)
+realpath_safe() {
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$p"
+  else
+    python3 - <<PY
+import os,sys
+print(os.path.normpath(sys.argv[1]))
+PY
+  fi
+}
+
+PREFIX_R="$(realpath_safe "$PREFIX")"
+CACHE_R="$(realpath_safe "$CACHE_DIR")"
+TRASH_R="$(realpath_safe "$TRASH")"
+
+log "PREFIX=$PREFIX_R"
+log "CACHE_DIR=$CACHE_R"
+log "TRASH=$TRASH_R"
+log "MODE: $( ((DRY_RUN)) && echo DRY-RUN || echo LIVE )  purge=$PURGE purge_cache=$PURGE_CACHE"
+
+# Hard safety guards (prevent catastrophic rm)
+case "$PREFIX_R" in
+  ""|"/"|"$HOME"|"$HOME/"|"$HOME/.local"|"$HOME/.local/"|"$HOME/.local/sg"|"$HOME/.local/sg/" )
+    die "Refusing dangerous PREFIX: $PREFIX_R"
+    ;;
+esac
+
+# Helper to execute or print
+doit() {
+  if ((DRY_RUN)); then
+    log "[DRY-RUN] $*"
+  else
+    eval "$@"
+  fi
+}
+
+confirm() {
+  local msg="$1"
+  if ((YES)); then
+    log "YES=1 -> skip prompt: $msg"
+    return 0
+  fi
+  echo
+  echo "== CONFIRM =="
+  echo "$msg"
+  echo -n "Type 'YES' to continue: "
+  read -r ans
+  [[ "$ans" == "YES" ]] || die "Aborted by user"
+}
+
+# 1) Remove / move PREFIX
+if [[ -d "$PREFIX_R" ]]; then
+  if ((PURGE)); then
+    confirm "About to DELETE (rm -rf) PREFIX: $PREFIX_R"
+    doit "rm -rf -- '$PREFIX_R'"
+    log "Removed PREFIX (purge): $PREFIX_R"
+  else
+    mkdir -p "$TRASH_R" >/dev/null 2>&1 || true
+    dst="$TRASH_R/nvhpc.$(date +%Y%m%d_%H%M%S)"
+    confirm "About to MOVE PREFIX to TRASH:\n  $PREFIX_R\n-> $dst"
+    doit "mkdir -p -- '$TRASH_R'"
+    doit "mv -v -- '$PREFIX_R' '$dst'"
+    log "Moved PREFIX to TRASH: $dst"
+  fi
+else
+  log "PREFIX not found (skip): $PREFIX_R"
+fi
+
+# 2) Optionally remove cache dir
+if ((PURGE_CACHE)); then
+  # cache safety: must be under $HOME
+  case "$CACHE_R" in
+    ""|"/"|"$HOME"|"$HOME/" )
+      die "Refusing dangerous CACHE_DIR: $CACHE_R"
+      ;;
+  esac
+  if [[ -d "$CACHE_R" ]]; then
+    confirm "About to DELETE (rm -rf) CACHE_DIR: $CACHE_R"
+    doit "rm -rf -- '$CACHE_R'"
+    log "Removed CACHE_DIR: $CACHE_R"
+  else
+    log "CACHE_DIR not found (skip): $CACHE_R"
+  fi
+else
+  log "Keeping CACHE_DIR (default). Use --purge-cache to delete it."
+fi
+
+log "DONE"
