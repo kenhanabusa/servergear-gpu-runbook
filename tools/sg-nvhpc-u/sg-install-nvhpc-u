@@ -151,7 +151,7 @@ path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:${PATH}" ;; esac; }
 ld_prepend()   { case ":${LD_LIBRARY_PATH-}:" in *":$1:"*) ;; *) LD_LIBRARY_PATH="$1${LD_LIBRARY_PATH+:$LD_LIBRARY_PATH}" ;; esac; }
 
 # 1) CUDA nvcc first (13.1)
-[ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}/bin" ] && path_prepend "${CUDA_HOME}/bin"
+[ -d "${NVHPC_ROOT}/compilers/bin" ] && path_prepend "${NVHPC_ROOT}/compilers/bin"
 
 # 2) Optional: HPC-X/OpenMPI (recommended; NVHPC MPI may error out on this host)
 if [ "${SG_USE_HPCX_MPI:-0}" = "1" ] || [ "${SG_MPI_IMPL:-}" = "hpcx" ]; then
@@ -168,7 +168,7 @@ if [ "${SG_USE_HPCX_MPI:-0}" = "1" ] || [ "${SG_MPI_IMPL:-}" = "hpcx" ]; then
 fi
 
 # 3) NVHPC compilers
-[ -d "${NVHPC_ROOT}/compilers/bin" ] && path_prepend "${NVHPC_ROOT}/compilers/bin"
+[ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}/bin" ] && path_prepend "${CUDA_HOME}/bin"
 
 # 4) Optional: NVHPC MPI (OFF by default; enable only if it works)
 if [ "${NVHPC_USE_MPI:-0}" = "1" ] && [ -d "${NVHPC_ROOT}/comm_libs/mpi/bin" ]; then
