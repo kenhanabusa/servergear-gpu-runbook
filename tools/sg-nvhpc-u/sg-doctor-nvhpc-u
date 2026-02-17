@@ -37,5 +37,7 @@ else
   echo "- NVHPC env.sh: not found (install needed)"
   echo
   echo "Next:"
-  echo "  NVHPC_ACCEPT_LICENSE=YES tools/sg-nvhpc-u/sg-install-nvhpc-u"
+  echo "  tools/sg-nvhpc-u/sg-install-nvhpc-u"
+  echo "  # first run (interactive): type YES -> creates ~/.config/server-gear/nvhpc_license_accepted"
+  echo "  # non-interactive (CI): NVHPC_ACCEPT_LICENSE=YES tools/sg-nvhpc-u/sg-install-nvhpc-u"
 fi
