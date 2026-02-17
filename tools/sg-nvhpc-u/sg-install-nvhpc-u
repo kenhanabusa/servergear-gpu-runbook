@@ -2,56 +2,195 @@
 set -euo pipefail
 
 TOOL="sg-install-nvhpc-u"
-ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
-log(){ echo "[$(ts)] [$TOOL] $*" >&2; }
-die(){ local c="$1"; shift; log "ERROR: $*"; exit "$c"; }
+log(){ printf '[%(%Y-%m-%dT%H:%M:%S%z)T] [%s] %s\n' -1 "$TOOL" "$*"; }
+die(){ log "ERROR: $*"; exit 1; }
 
-FETCH_URL="${NVHPC_FETCH_URL:-https://notes.server-gear.com/assets/downloads/nvhpc_fetch_linux_x86_64.sh}"
-PREFIX="${NVHPC_PREFIX:-$HOME/.local/sg/nvhpc}"
-MODE="${NVHPC_MODE:-install}"
+FETCH_URL="${FETCH_URL:-https://notes.server-gear.com/assets/downloads/nvhpc_fetch_linux_x86_64.sh}"
+PREFIX="${PREFIX:-$HOME/.local/sg/nvhpc}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/sg/nvhpc}"
+TARBALL="${TARBALL:-$CACHE_DIR/nvhpc_linux_x86_64.tar.gz}"
+TRASH="${TRASH:-$HOME/.local/sg/_trash}"
 
-# Explicit EULA consent required
-: "${NVHPC_ACCEPT_LICENSE:=}"
-if [ "${NVHPC_ACCEPT_LICENSE}" != "YES" ]; then
-  die 20 "EULA not accepted. Run with: NVHPC_ACCEPT_LICENSE=YES $0"
+# EULA
+if [[ "${NVHPC_ACCEPT_LICENSE:-}" != "YES" ]]; then
+  die "EULA not accepted. Run with: NVHPC_ACCEPT_LICENSE=YES $0"
 fi
 
-mkdir -p "$PREFIX" "$HOME/.cache/sg/nvhpc" "$HOME/.cache/sg/nvhpc_work"
+mkdir -p "$CACHE_DIR" "$TRASH"
 
 log "FETCH_URL=$FETCH_URL"
 log "PREFIX=$PREFIX"
-log "MODE=$MODE"
-log "Installing NVHPC (user-space) via notes fetch script..."
+log "CACHE_DIR=$CACHE_DIR"
+log "TARBALL=$TARBALL"
 
-# Run fetch script (it handles URL + install). We pass install settings via env vars.
-export NVHPC_ACCEPT_LICENSE=YES
-export NVHPC_MODE="$MODE"
-export NVHPC_CACHE_DIR="$HOME/.cache/sg/nvhpc"
-export NVHPC_WORK_DIR="$HOME/.cache/sg/nvhpc_work"
-export NVHPC_INSTALL_DIR="$PREFIX"
-export NVHPC_INSTALL_TYPE="${NVHPC_INSTALL_TYPE:-single}"   # avoid auto on shared env
-export NVHPC_SILENT="${NVHPC_SILENT:-true}"
-
-if command -v curl >/dev/null 2>&1; then
-  bash <(curl -fsSL "$FETCH_URL")
+# 1) Fetch tarball (best-effort). If already exists, do not re-download.
+if [[ -s "$TARBALL" ]]; then
+  log "Tarball exists; skip download: $TARBALL"
 else
-  wget -qO- "$FETCH_URL" | bash
+  log "Downloading fetch script..."
+  FETCH_SH="$CACHE_DIR/nvhpc_fetch.sh"
+  curl -L --fail -o "$FETCH_SH" "$FETCH_URL"
+  chmod +x "$FETCH_SH"
+
+  log "Running fetch script (best-effort; may fail after download depending on package layout)..."
+  set +e
+  "$FETCH_SH"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    log "WARN: fetch script returned rc=$rc (continuing if tarball exists)"
+  fi
+
+  [[ -s "$TARBALL" ]] || die "Tarball not found after fetch: $TARBALL"
 fi
 
-# Source env for current shell
-ENV_SH="$PREFIX/env.sh"
-if [ ! -f "$ENV_SH" ]; then
-  die 40 "NVHPC env not found: $ENV_SH"
+# Optional sha256 verification
+if [[ -n "${NVHPC_TARBALL_SHA256:-}" ]]; then
+  log "Verifying sha256..."
+  echo "${NVHPC_TARBALL_SHA256}  ${TARBALL}" | sha256sum -c -
+else
+  log "WARN: NVHPC_TARBALL_SHA256 not set. Skipping sha256 verification."
 fi
 
-# shellcheck disable=SC1090
-source "$ENV_SH"
+# 2) Unpack
+WORK="$CACHE_DIR/unpack.$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$WORK"
+log "Unpacking to $WORK ..."
+tar -xzf "$TARBALL" -C "$WORK"
 
-log "NVHPC ready:"
-which nvc || true
-which nvfortran || true
-which mpirun || true
-nvc --version | head -n 2 || true
-mpirun --version | head -n 2 || true
+# 3) Locate installer dir (handles nested top-dir layouts)
+INSTALL_DIR=""
+if [[ -x "$WORK/install" ]]; then
+  INSTALL_DIR="$WORK"
+else
+  TOP="$(tar -tzf "$TARBALL" | head -n 1 | cut -d/ -f1 || true)"
+  if [[ -n "$TOP" && -x "$WORK/$TOP/install" ]]; then
+    INSTALL_DIR="$WORK/$TOP"
+  else
+    # fallback search
+    found="$(find "$WORK" -maxdepth 3 -type f -name install -perm -111 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$found" ]]; then
+      INSTALL_DIR="$(cd "$(dirname "$found")" && pwd -P)"
+    fi
+  fi
+fi
+[[ -n "$INSTALL_DIR" ]] || die "./install not found under unpack dir (unexpected package layout). WORK=$WORK"
 
-log "OK. Next: run QE user build with sg-qe-gpu-src-u."
+log "Installer dir: $INSTALL_DIR"
+ls -lah "$INSTALL_DIR" | head -n 40 || true
+[[ -x "$INSTALL_DIR/install" ]] || die "install exists but not executable: $INSTALL_DIR/install"
+
+# 4) Move existing prefix to trash (safe)
+if [[ -d "$PREFIX" ]]; then
+  dst="$TRASH/nvhpc.$(date +%Y%m%d_%H%M%S)"
+  log "Moving existing PREFIX to trash: $PREFIX -> $dst"
+  mv -v "$PREFIX" "$dst"
+fi
+
+# 5) Run installer (silent)
+log "== run installer (silent) =="
+export NVHPC_SILENT="${NVHPC_SILENT:-true}"
+export NVHPC_INSTALL_TYPE="${NVHPC_INSTALL_TYPE:-single}"
+export NVHPC_INSTALL_DIR="$PREFIX"
+
+cd "$INSTALL_DIR"
+./install
+
+# 6) Write minimal env.sh (compiler only; MPI is chosen by caller, e.g. HPC-X)
+"$PREFIX/Linux_x86_64/2026/compilers/bin/nvfortran" --version | head -n 2 || true
+
+# === SG_ENV_SH_BEGIN ===
+write_env_sh() {
+  local env_sh="$PREFIX/env.sh"
+  mkdir -p "$(dirname "$env_sh")"
+
+  cat > "$env_sh" <<'EOF'
+#!/usr/bin/env bash
+# NVHPC user-space environment (generated by sg-install-nvhpc-u)
+#
+# Recommended on this host:
+#   export NVHPC_CUDA_VER=13.1
+#   export NVHPC_USE_MPI=0
+#   export SG_USE_HPCX_MPI=1
+#   source ~/.local/sg/nvhpc/env.sh
+
+NVHPC_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+export NVHPC_HOME
+
+# Root (prefer 2026 symlink)
+if [ -d "$NVHPC_HOME/Linux_x86_64/2026" ]; then
+  NVHPC_ROOT="$NVHPC_HOME/Linux_x86_64/2026"
+  [ -L "$NVHPC_ROOT" ] && NVHPC_ROOT="$(readlink -f "$NVHPC_ROOT")"
+else
+  NVHPC_ROOT="$(ls -d "$NVHPC_HOME"/Linux_x86_64/*/ 2>/dev/null | sed 's:/*$::' | sort -V | tail -n1)"
+fi
+export NVHPC_ROOT
+if [ -z "${NVHPC_ROOT:-}" ] || [ ! -d "$NVHPC_ROOT" ]; then
+  echo "[nvhpc env] ERROR: NVHPC_ROOT not found under $NVHPC_HOME/Linux_x86_64" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+# CUDA selector (default 13.1)
+NVHPC_CUDA_VER="${NVHPC_CUDA_VER:-13.1}"
+if [ -d "${NVHPC_ROOT}/cuda/${NVHPC_CUDA_VER}" ]; then
+  NVHPC_CUDA_HOME="${NVHPC_ROOT}/cuda/${NVHPC_CUDA_VER}"
+elif [ -d "${NVHPC_ROOT}/cuda/13.1" ]; then
+  NVHPC_CUDA_HOME="${NVHPC_ROOT}/cuda/13.1"
+else
+  NVHPC_CUDA_HOME=""
+fi
+export NVHPC_CUDA_HOME
+export CUDA_HOME="${CUDA_HOME:-${NVHPC_CUDA_HOME}}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
+
+# comm libs home (some NVHPC MPI tools expect this)
+[ -d "${NVHPC_ROOT}/comm_libs" ] && export NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs"
+
+# Helpers: prepend only if not already present
+path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:${PATH}" ;; esac; }
+ld_prepend()   { case ":${LD_LIBRARY_PATH-}:" in *":$1:"*) ;; *) LD_LIBRARY_PATH="$1${LD_LIBRARY_PATH+:$LD_LIBRARY_PATH}" ;; esac; }
+
+# 1) CUDA nvcc first (13.1)
+[ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}/bin" ] && path_prepend "${CUDA_HOME}/bin"
+
+# 2) Optional: HPC-X/OpenMPI (recommended; NVHPC MPI may error out on this host)
+if [ "${SG_USE_HPCX_MPI:-0}" = "1" ] || [ "${SG_MPI_IMPL:-}" = "hpcx" ]; then
+  HPCX_OMPI_DEFAULT="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/comm_libs/12.9/hpcx/hpcx-2.22.1/ompi"
+  HPCX_OMPI="${HPCX_OMPI:-$HPCX_OMPI_DEFAULT}"
+  if [ -d "${HPCX_OMPI}/bin" ]; then
+    export HPCX_OMPI
+    path_prepend "${HPCX_OMPI}/bin"
+    ld_prepend   "${HPCX_OMPI}/lib"
+    export OPAL_PREFIX="${OPAL_PREFIX:-$HPCX_OMPI}"
+  else
+    echo "[nvhpc env] WARN: HPCX_OMPI not found: ${HPCX_OMPI}" >&2
+  fi
+fi
+
+# 3) NVHPC compilers
+[ -d "${NVHPC_ROOT}/compilers/bin" ] && path_prepend "${NVHPC_ROOT}/compilers/bin"
+
+# 4) Optional: NVHPC MPI (OFF by default; enable only if it works)
+if [ "${NVHPC_USE_MPI:-0}" = "1" ] && [ -d "${NVHPC_ROOT}/comm_libs/mpi/bin" ]; then
+  path_prepend "${NVHPC_ROOT}/comm_libs/mpi/bin"
+  ld_prepend   "${NVHPC_ROOT}/comm_libs/mpi/lib"
+  if [ -z "${OPAL_PREFIX:-}" ] && [ -r "${NVHPC_ROOT}/comm_libs/mpi/share/openmpi/help-opal-runtime.txt" ]; then
+    export OPAL_PREFIX="${NVHPC_ROOT}/comm_libs/mpi"
+  fi
+fi
+
+# libs
+[ -d "${NVHPC_ROOT}/compilers/lib" ] && ld_prepend "${NVHPC_ROOT}/compilers/lib"
+[ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}/lib64" ] && ld_prepend "${CUDA_HOME}/lib64"
+export PATH LD_LIBRARY_PATH
+EOF
+
+  chmod +x "$env_sh"
+  log "env.sh generated: $env_sh"
+}
+
+if [ -d "$PREFIX/Linux_x86_64" ]; then
+  write_env_sh
+fi
+# === SG_ENV_SH_END ===
+
