@@ -2,6 +2,7 @@
 set -euo pipefail
 
 TOOL="sg-install-nvhpc-u"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 log(){ printf '[%(%Y-%m-%dT%H:%M:%S%z)T] [%s] %s\n' -1 "$TOOL" "$*"; }
 die(){ log "ERROR: $*"; exit 1; }
 
@@ -12,8 +13,45 @@ TARBALL="${TARBALL:-$CACHE_DIR/nvhpc_linux_x86_64.tar.gz}"
 TRASH="${TRASH:-$HOME/.local/sg/_trash}"
 
 # EULA
-if [[ "${NVHPC_ACCEPT_LICENSE:-}" != "YES" ]]; then
-  die "EULA not accepted. Run with: NVHPC_ACCEPT_LICENSE=YES $0"
+# UX:
+# - Interactive shell: ask once, then store acceptance marker in user home
+# - Non-interactive: require NVHPC_ACCEPT_LICENSE=YES (safe for CI)
+ACCEPT_FILE="${NVHPC_ACCEPT_FILE:-$HOME/.config/server-gear/nvhpc_license_accepted}"
+
+create_accept_marker() {
+  mkdir -p "$(dirname "$ACCEPT_FILE")"
+  {
+    printf 'accepted_at=%(%Y-%m-%dT%H:%M:%S%z)T
+' -1
+    echo "tool=$TOOL"
+    echo "user=$USER"
+    echo "host=$(hostname)"
+  } > "$ACCEPT_FILE"
+}
+
+if [[ -f "$ACCEPT_FILE" ]]; then
+  log "EULA accepted via marker: $ACCEPT_FILE"
+else
+  if [[ "${NVHPC_ACCEPT_LICENSE:-}" = "YES" ]]; then
+    log "EULA accepted via env NVHPC_ACCEPT_LICENSE=YES"
+    create_accept_marker
+    log "EULA marker created: $ACCEPT_FILE"
+  else
+    if [[ -t 0 ]]; then
+      echo
+      echo "NVHPC EULA acceptance required."
+      echo "Please review the NVIDIA HPC SDK license terms, then type YES to accept."
+      echo "Marker will be created at: $ACCEPT_FILE"
+      read -r -p "Type YES to accept: " ans
+      if [[ "$ans" != "YES" ]]; then
+        die "EULA not accepted (you typed: $ans)."
+      fi
+      create_accept_marker
+      log "EULA accepted; marker created: $ACCEPT_FILE"
+    else
+      die "EULA not accepted. Run interactively, or set NVHPC_ACCEPT_LICENSE=YES, or create $ACCEPT_FILE"
+    fi
+  fi
 fi
 
 mkdir -p "$CACHE_DIR" "$TRASH"
@@ -45,13 +83,29 @@ else
 fi
 
 # Optional sha256 verification
-if [[ -n "${NVHPC_TARBALL_SHA256:-}" ]]; then
-  log "Verifying sha256..."
-  echo "${NVHPC_TARBALL_SHA256}  ${TARBALL}" | sha256sum -c -
-else
-  log "WARN: NVHPC_TARBALL_SHA256 not set. Skipping sha256 verification."
+# Checksum verification (sha256 preferred; fallback to md5)
+EXPECT_SHA="${NVHPC_TARBALL_SHA256:-}"
+EXPECT_MD5="${NVHPC_TARBALL_MD5:-}"
+
+# If no checksum provided, try to infer from package topdir (official MD5 list)
+if [[ -z "$EXPECT_SHA" && -z "$EXPECT_MD5" ]]; then
+  TOPDIR="$(tar -tzf "$TARBALL" | head -n 1 | cut -d/ -f1 || true)"
+  case "$TOPDIR" in
+    nvhpc_2026_261_Linux_x86_64_cuda_13.1)
+      EXPECT_MD5="b796dd315b951a70e1a81024b82c4689"
+      ;;
+  esac
 fi
 
+if [[ -n "$EXPECT_SHA" ]]; then
+  log "Verifying sha256..."
+  echo "${EXPECT_SHA}  ${TARBALL}" | sha256sum -c -
+elif [[ -n "$EXPECT_MD5" ]]; then
+  log "Verifying md5..."
+  echo "${EXPECT_MD5}  ${TARBALL}" | md5sum -c -
+else
+  log "WARN: No checksum provided and no known mapping for this tarball; skipping integrity check."
+fi
 # 2) Unpack
 WORK="$CACHE_DIR/unpack.$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$WORK"
@@ -88,8 +142,15 @@ if [[ -d "$PREFIX" ]]; then
 fi
 
 # 5) Run installer (silent)
-log "== run installer (silent) =="
-export NVHPC_SILENT="${NVHPC_SILENT:-true}"
+log "== run installer (silent/interactive) =="
+# Installer UI:
+# - TTY: prefer interactive installer unless explicitly set
+# - non-TTY: default silent for CI
+if [[ -t 0 ]]; then
+  export NVHPC_SILENT="${NVHPC_SILENT:-false}"
+else
+  export NVHPC_SILENT="${NVHPC_SILENT:-true}"
+fi
 export NVHPC_INSTALL_TYPE="${NVHPC_INSTALL_TYPE:-single}"
 export NVHPC_INSTALL_DIR="$PREFIX"
 
