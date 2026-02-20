@@ -56,6 +56,12 @@ sg-verify-gpu
 ネイティブ QE 7.5 と NGC QE 7.3.1 を **同条件** で比較するためのベンチ実行スクリプトです。
 np=4 は **必ず `-nk 1`** で統一し、pinning は `mpirun --bind-to core --map-by slot` に固定します。
 
+Handoff（再開用要約）: `runbooks/HANDOFF_QE_BENCH_STATE.md`
+
+運用ルール（重要）:
+- `k=1` は **同条件比較** 用（native/NGCの横比較）
+- `k=2x2x2` は **スケーリング検証** 用（`-nk` を使った並列効率確認）
+
 ### 実行例
 ```bash
 tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc \
