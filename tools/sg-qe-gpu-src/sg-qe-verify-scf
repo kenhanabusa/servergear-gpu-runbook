@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Usage:
+  sg-qe-verify-scf [--prefix /path/to/qe-prefix] [--np N] [--mode short|long|both] [--require-gpu]
+
+Goal:
+  - User does NOT need to export PATH/LD_LIBRARY_PATH.
+  - User does NOT need to set QE env var.
+  - This script auto-detects QE prefix if --prefix is omitted.
+
+Options:
+  --prefix PATH   QE install prefix (contains bin/pw.x etc). If omitted, auto-detect.
+  --np N          MPI ranks (default: 1)
+  --mode MODE     short | long | both (default: both)
+
+Env overrides (optional):
+  SG_QE_PREFIX       Force QE prefix (same as --prefix)
+  SG_QE_OMPI_ROOT    Force OpenMPI root (contains bin/mpirun, lib/)
+  SG_QE_NVHPC_COMP   Force NVHPC compilers root (contains bin/nvfortran, lib*/)
+
+  SG_QE_LONG_ECUTWFC (default: 60)
+  SG_QE_LONG_KGRID   (default: 8)  # kx=ky=kz
+USAGE
+}
+
+die(){ echo "ERROR: $*" >&2; exit 1; }
+
+MODE="both"
+NP="1"
+QE_PREFIX="${SG_QE_PREFIX:-}"
+REQUIRE_GPU=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prefix) QE_PREFIX="${2:-}"; shift 2;;
+    --np) NP="${2:-}"; shift 2;;
+    --mode) MODE="${2:-}"; shift 2;;
+    --require-gpu) REQUIRE_GPU=1; shift 1;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown arg: $1";;
+  esac
+done
+
+# ------------------------------
+# QE prefix auto-detect (ユーザーが QE=... を打たなくて良い)
+# ------------------------------
+is_qe_prefix() {
+  local p="$1"
+  [[ -n "$p" && -d "$p" && -x "$p/bin/pw.x" ]]
+}
+
+pick_latest_dir() { # args: glob...
+  local items=()
+  # shellcheck disable=SC2206
+  items=( $* )
+  [[ ${#items[@]} -gt 0 ]] || return 1
+  printf '%s\n' "${items[@]}" | sort -V | tail -n 1
+}
+
+detect_qe_prefix() {
+  # 0) already set via --prefix or SG_QE_PREFIX
+  if is_qe_prefix "$QE_PREFIX"; then
+    echo "$QE_PREFIX"
+    return 0
+  fi
+
+  # 1) fixed/default location (runbook standard)
+  local cand
+  cand="$HOME/.local/sg/qe-gpu-src/qe-7.5"
+  if is_qe_prefix "$cand"; then
+    echo "$cand"
+    return 0
+  fi
+
+  # 2) pick latest under ~/.local/sg/qe-gpu-src/qe-*
+  cand="$(pick_latest_dir "$HOME/.local/sg/qe-gpu-src/qe-"* 2>/dev/null || true)"
+  if is_qe_prefix "$cand"; then
+    echo "$cand"
+    return 0
+  fi
+
+  # 3) if pw.x is in PATH, try to infer prefix
+  local pw
+  pw="$(command -v pw.x 2>/dev/null || true)"
+  if [[ -n "$pw" ]]; then
+    cand="$(cd "$(dirname "$pw")/.." && pwd)"
+    if is_qe_prefix "$cand"; then
+      echo "$cand"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+QE_PREFIX="$(detect_qe_prefix 2>/dev/null || true)"
+is_qe_prefix "$QE_PREFIX" || die "QE prefix not found. Install QE first, or pass --prefix /path/to/qe-prefix (or set SG_QE_PREFIX)."
+
+# ------------------------------
+# runtime env auto-setup (user export不要)
+# ------------------------------
+pick_latest() { # args: glob...
+  local items=()
+  # shellcheck disable=SC2206
+  items=( $* )
+  if [[ ${#items[@]} -eq 0 ]]; then return 1; fi
+  printf '%s\n' "${items[@]}" | sort -V | tail -n 1
+}
+
+sg_detect_nvhpc_compilers() {
+  if [[ -n "${SG_QE_NVHPC_COMP:-}" && -d "${SG_QE_NVHPC_COMP:-}" ]]; then
+    echo "$SG_QE_NVHPC_COMP"; return 0
+  fi
+
+  local nvf
+  nvf="$(command -v nvfortran 2>/dev/null || true)"
+  if [[ -n "$nvf" ]]; then
+    (cd "$(dirname "$nvf")/.." && pwd); return 0
+  fi
+
+  local cand
+  cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/compilers 2>/dev/null || true)"
+  [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+  return 1
+}
+
+sg_detect_ompi_root() {
+  if [[ -n "${SG_QE_OMPI_ROOT:-}" && -d "${SG_QE_OMPI_ROOT:-}" ]]; then
+    echo "$SG_QE_OMPI_ROOT"; return 0
+  fi
+
+  local mr
+  mr="$(command -v mpirun 2>/dev/null || true)"
+  if [[ -n "$mr" ]]; then
+    (cd "$(dirname "$mr")/.." && pwd); return 0
+  fi
+
+  local cand
+  cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/comm_libs/*/hpcx/hpcx-*/ompi 2>/dev/null || true)"
+  [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+  return 1
+}
+
+sg_setup_runtime_env() {
+  local nvhpc_compilers ompi_root
+  nvhpc_compilers="$(sg_detect_nvhpc_compilers 2>/dev/null || true)"
+  ompi_root="$(sg_detect_ompi_root 2>/dev/null || true)"
+
+  if [[ -n "$ompi_root" && -x "$ompi_root/bin/mpirun" ]]; then
+    export PATH="$ompi_root/bin:$PATH"
+  fi
+
+  local add=""
+  if [[ -n "$nvhpc_compilers" ]]; then
+    [[ -d "$nvhpc_compilers/lib"   ]] && add="$add:$nvhpc_compilers/lib"
+    [[ -d "$nvhpc_compilers/lib64" ]] && add="$add:$nvhpc_compilers/lib64"
+    local nvhpc_root
+    nvhpc_root="$(cd "$nvhpc_compilers/.." && pwd 2>/dev/null || true)"
+    [[ -n "$nvhpc_root" && -d "$nvhpc_root/math_libs/lib64" ]] && add="$add:$nvhpc_root/math_libs/lib64"
+  fi
+  if [[ -n "$ompi_root" ]]; then
+    [[ -d "$ompi_root/lib"   ]] && add="$add:$ompi_root/lib"
+    [[ -d "$ompi_root/lib64" ]] && add="$add:$ompi_root/lib64"
+  fi
+
+  add="${add#:}"
+  if [[ -n "$add" ]]; then
+    export LD_LIBRARY_PATH="$add${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+}
+
+sg_setup_runtime_env
+command -v mpirun >/dev/null 2>&1 || die "mpirun not found even after auto-setup"
+
+# ------------------------------
+# work/log dirs
+# ------------------------------
+TS="$(date +%Y%m%d_%H%M%S)"
+LOGDIR="$QE_PREFIX/.sg-logs"
+WORKDIR="$QE_PREFIX/.sg-work/verify-scf_$TS"
+mkdir -p "$LOGDIR" "$WORKDIR"/{tmp,pseudo}
+
+LOG="$LOGDIR/verify-scf_$TS.log"
+GPU_SUMMARY="$LOGDIR/verify-scf_gpu_$TS.txt"
+
+# ------------------------------
+# pseudo: try to find Si UPF without network
+# ------------------------------
+find_si_upf() {
+  local p
+  for p in \
+    "$HOME/.cache/sg/qe-gpu-src-u/qe-src/pseudo/Si.pz-vbc.UPF" \
+    "$HOME/.cache/sg/qe-gpu-src-u/inputs/pseudos/Si.pz-vbc.UPF" \
+    ; do
+    [[ -f "$p" ]] && { echo "$p"; return 0; }
+  done
+
+  local hit
+  hit="$(find "$HOME/.cache/sg" -type f -iname 'Si*.upf*' 2>/dev/null | head -n 1 || true)"
+  [[ -n "$hit" && -f "$hit" ]] && { echo "$hit"; return 0; }
+
+  return 1
+}
+
+SI_UPF="$(find_si_upf 2>/dev/null || true)"
+[[ -n "$SI_UPF" ]] || die "Si UPF not found under ~/.cache/sg. (expected after sg-install-qe-gpu-src-u)."
+
+cp -f "$SI_UPF" "$WORKDIR/pseudo/Si.UPF"
+PSEUDO_DIR="$WORKDIR/pseudo"
+
+write_short_in() {
+  cat > "$WORKDIR/si_short.in" <<IN
+&control
+  calculation = 'scf'
+  prefix      = 'si_short'
+  pseudo_dir  = '$PSEUDO_DIR'
+  outdir      = '$WORKDIR/tmp'
+  verbosity   = 'high'
+/
+&system
+  ibrav = 2
+  celldm(1) = 10.26
+  nat = 2
+  ntyp = 1
+  ecutwfc = 20
+/
+&electrons
+  conv_thr = 1.0d-8
+  mixing_beta = 0.7
+/
+ATOMIC_SPECIES
+  Si  28.0855  Si.UPF
+ATOMIC_POSITIONS (crystal)
+  Si 0.00 0.00 0.00
+  Si 0.25 0.25 0.25
+K_POINTS (automatic)
+  1 1 1  0 0 0
+IN
+}
+
+write_long_in() {
+  local ecut k
+  ecut="${SG_QE_LONG_ECUTWFC:-60}"
+  k="${SG_QE_LONG_KGRID:-8}"
+  cat > "$WORKDIR/si_long.in" <<IN
+&control
+  calculation = 'scf'
+  prefix      = 'si_long'
+  pseudo_dir  = '$PSEUDO_DIR'
+  outdir      = '$WORKDIR/tmp'
+  verbosity   = 'high'
+/
+&system
+  ibrav = 2
+  celldm(1) = 10.26
+  nat = 2
+  ntyp = 1
+  ecutwfc = $ecut
+  ecutrho = $(awk "BEGIN{printf \"%d\", $ecut*8}")
+/
+&electrons
+  conv_thr = 1.0d-10
+  mixing_beta = 0.5
+  electron_maxstep = 200
+/
+ATOMIC_SPECIES
+  Si  28.0855  Si.UPF
+ATOMIC_POSITIONS (crystal)
+  Si 0.00 0.00 0.00
+  Si 0.25 0.25 0.25
+K_POINTS (automatic)
+  $k $k $k  0 0 0
+IN
+}
+
+extract_gpu_lines() {
+  local f="$1"
+  {
+    echo "== GPU-related lines from: $f =="
+    grep -nE 'GPU|CUDA|accel|Device name|print_cuda_info|gpu=' "$f" 2>/dev/null || true
+    echo
+  } >> "$GPU_SUMMARY"
+}
+
+check_gpu_required() {
+  if [[ "$REQUIRE_GPU" -ne 1 ]]; then
+    return 0
+  fi
+  if ! grep -qiE 'GPU|CUDA|accel|Device name|print_cuda_info|gpu=' "$GPU_SUMMARY"; then
+    die "--require-gpu was set but no GPU-related lines were detected in outputs ($GPU_SUMMARY)"
+  fi
+}
+
+run_pw() {
+  local tag="$1" infile="$2"
+  local out="$WORKDIR/${tag}.out"
+
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+  echo "== RUN $tag (np=$NP) ==" | tee -a "$LOG"
+  echo "cmd: mpirun -np $NP $QE_PREFIX/bin/pw.x -in $infile" | tee -a "$LOG"
+
+  ( set -x
+    mpirun -np "$NP" "$QE_PREFIX/bin/pw.x" -in "$infile"
+  ) >"$out" 2>&1 || {
+    tail -n 80 "$out" | sed 's/^/[tail] /' | tee -a "$LOG" >&2
+    die "$tag failed"
+  }
+
+  grep -qE '!\s+total energy' "$out" || {
+    tail -n 120 "$out" | sed 's/^/[tail] /' | tee -a "$LOG" >&2
+    die "$tag: total energy not found"
+  }
+
+  extract_gpu_lines "$out"
+  echo "OK: $tag -> $out" | tee -a "$LOG"
+}
+
+main() {
+  echo "== QE_PREFIX=$QE_PREFIX" | tee "$LOG"
+  echo "== WORKDIR=$WORKDIR" | tee -a "$LOG"
+  echo "== PSEUDO(Si)=$SI_UPF" | tee -a "$LOG"
+  echo "== mpirun=$(command -v mpirun)" | tee -a "$LOG"
+  echo "== LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}" | tee -a "$LOG"
+  echo "== GPU_SUMMARY=$GPU_SUMMARY" | tee -a "$LOG"
+  : > "$GPU_SUMMARY"
+
+  case "$MODE" in
+    short)
+      write_short_in
+      run_pw "short" "$WORKDIR/si_short.in"
+      ;;
+    long)
+      write_long_in
+      run_pw "long" "$WORKDIR/si_long.in"
+      ;;
+    both)
+      write_short_in
+      run_pw "short" "$WORKDIR/si_short.in"
+      write_long_in
+      run_pw "long" "$WORKDIR/si_long.in"
+      ;;
+    *)
+      die "Unknown --mode: $MODE (use short|long|both)"
+      ;;
+  esac
+
+  check_gpu_required
+  echo "DONE. LOG=$LOG" | tee -a "$LOG"
+  echo "DONE. GPU_SUMMARY=$GPU_SUMMARY" | tee -a "$LOG"
+}
+
+main

@@ -98,7 +98,22 @@ else
   echo "[WARN] CUDA_HOME not resolved; GPU configure may fall back to CPU build." >&2
 fi
 
+MPI_PREF="${MPI_PREF:-/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/comm_libs/12.9/hpcx/hpcx-2.22.1/ompi/bin}"
+if [ -d "$MPI_PREF" ]; then
+  export PATH="$MPI_PREF:$PATH"
+fi
+
+log "CUDA_HOME=${CUDA_HOME:-<unset>}"
+log "CUDA_CC=${CUDA_CC}"
+log "CUDA_RUNTIME=${CUDA_RUNTIME}"
+
 ./configure --prefix="$INSTALL_DIR" \
+  --with-cuda="$CUDA_HOME" \
+  --with-cuda-runtime="$CUDA_RUNTIME" \
+  --with-cuda-cc="$CUDA_CC" \
+  CC="$(command -v nvc)" \
+  F90="$(command -v nvfortran)" \
+  MPIF90="$(command -v mpif90)" \
   2>&1 | tee "$LOGDIR/configure.log"
 
 make -j "$JOBS" pw \

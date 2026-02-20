@@ -204,3 +204,25 @@ WORK_K222=/home/dl/bench/BENCH-QE-LLZO-SCF-001/20260219_092728/work/ngc_k222_202
 - LLZO k222 NGC baseline: `410.74s -> 343.91s` = `1.194x`
 - LLZO k222 NGC ucx candidate: `410.74s -> 299.95s` = `1.369x`（np1 baseline基準）
 - LLZO k222 NGC vader candidate: `410.74s -> 317.06s` = `1.296x`（np1 baseline基準）
+
+## Cleanroom Final (2026-02-20)
+- SSOTメモ:
+  - `runbooks/HANDOFF_QE_CLEANROOM_PLAN.md`
+- pre/rm/post proof:
+  - `/home/dl/bench/_proof_pre_20260220_155751.txt`
+  - `/home/dl/bench/_proof_rm_20260220_155825.txt`
+  - `/home/dl/bench/_proof_post_20260220_163516.txt`
+- verify (`sg-qe-verify-scf --require-gpu`):
+  - np1: `/home/dl/.local/sg/qe-gpu-src/qe-7.5/.sg-logs/verify-scf_20260220_163532.log`
+  - np1 GPU: `/home/dl/.local/sg/qe-gpu-src/qe-7.5/.sg-logs/verify-scf_gpu_20260220_163532.txt`
+  - np4: `/home/dl/.local/sg/qe-gpu-src/qe-7.5/.sg-logs/verify-scf_20260220_163549.log`
+  - np4 GPU: `/home/dl/.local/sg/qe-gpu-src/qe-7.5/.sg-logs/verify-scf_gpu_20260220_163549.txt`
+- test-suite (pw atom/dft/berry, `--nprocs 1`):
+  - pw_atom: `/home/dl/bench/BENCH-QE-TESTSUITE-001/logs/qe_testsuite_20260220_163603/summary.txt`
+  - pw_dft: `/home/dl/bench/BENCH-QE-TESTSUITE-001/logs/qe_testsuite_20260220_163714/summary.txt`
+  - pw_berry: `/home/dl/bench/BENCH-QE-TESTSUITE-001/logs/qe_testsuite_20260220_163746/summary.txt`
+- bench preset (`epw_metal_bench_heavy`):
+  - summary: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary.txt`
+  - summary_all: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_all.txt`
+  - summary_bench2: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_bench2.txt`
+  - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260220_163805.zip`
