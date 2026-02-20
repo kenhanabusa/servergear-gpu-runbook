@@ -92,6 +92,58 @@ tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc \
 
 ---
 
+## QE Test-suite (Official PASS/FAIL)
+本Runbookの対象範囲（PW/PH/PP）の公式test-suiteを実行し、PASSを確認しています。さらにRunbook独自のGPU verifyでGPU動作証跡を取得します。  
+再開用メモ: `runbooks/HANDOFF_QE_TESTSUITE.md`
+
+### スコープ宣言
+- 対象範囲（このRunbookが保証する領域）:
+  - `pw.x` / `ph.x` / `q2r.x` / `matdyn.x` / `pp.x` / `projwfc.x` など PW/PH/PP 系
+- 公式 test-suite の実行範囲:
+  - 上記に対応するサブセット（例: `pw_*` / `ph_*` / `pp_*`）を実行して PASS/FAIL を確認
+- 非対象（SKIP 扱い）:
+  - `cp.x` を使う CPV 系など、Runbookスコープ外またはバイナリ未提供の系
+  - 例: `cp.x missing` は FAIL 主因ではなく「スコープ外SKIP」として記録
+
+### 結果の読み方
+- `PASS`: 対象サブセットの比較が通過
+- `FAIL`: 対象サブセットで差分・実行失敗が発生
+- `SKIP`: スコープ外、または必要バイナリ欠如（理由を summary に明記）
+
+### 実行例（NPROCS=1）
+```bash
+# 対象範囲の代表: PW サブセット
+tools/sg-qe-gpu-src/sg-qe-run-test-suite \
+  --qe-build /home/dl/.local/sg/qe-gpu-src/qe-7.5 \
+  --subset pw \
+  --nprocs 1
+```
+
+### 主な引数
+- `--qe-src DIR`: QE source tree（`test-suite/Makefile` を含む）
+- `--qe-build DIR`: QE build/prefix（`bin/pw.x` 等を含む）
+- `--subset ...`: `pw|ph|pp|all`（`,` 区切り可）
+- `--include-glob`: `pw_*` のような test-suite ディレクトリ指定
+- `--bench-root DIR`: 出力先（既定: `/home/dl/bench/BENCH-QE-TESTSUITE-001`）
+- `--nprocs N`: `make NPROCS=N ...` の N（既定: `1`）
+
+### 成果物
+- work: `bench-root/work/qe_testsuite_YYYYmmdd_HHMMSS/`
+- logs: `bench-root/logs/qe_testsuite_YYYYmmdd_HHMMSS/`
+  - `run-tests.log`（生ログ）
+  - `summary.txt`（PASS/FAIL/SKIP件数・代表エラー）
+  - `suite_results.tsv`（サブセット別集計）
+  - `failures.txt`（失敗候補）
+  - `command.txt`（実行条件）
+- zip: `bench-root/qe_testsuite_YYYYmmdd_HHMMSS.zip`
+
+### Runbook独自 GPU Verify（第2層）
+- GPUビルド証跡: `readelf` / `ldd` でリンク確認
+- 実行証跡: stdout の GPU 関連行（`GPU` timing 等）
+- デバイス証跡: `nvidia-smi` csv（util/memory）
+
+---
+
 ## 相談が早いケース（有償）
 - 本番環境で失敗できない / 期限がある
 - Secure Boot / DKMS / Kernel差分で詰まる

@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+usage() {
+  cat <<USAGE
+Usage:
+  sg-qe-run-test-suite [--qe-src DIR] [--qe-build DIR]
+                       [--bench-root DIR] [--nprocs N]
+                       [--subset all|pw|ph|pp|pw,ph,pp]
+                       [--include-glob GLOB]
+
+Defaults:
+  --bench-root   /home/dl/bench/BENCH-QE-TESTSUITE-001
+  --nprocs       1
+  --subset       all
+
+Notes:
+  - Official flow: cd test-suite && make NPROCS=X run-tests-<suite>
+  - --subset all runs: pw,cp,ph,pp,hp,tddfpt,kcw,pioud
+  - Missing required executables are counted as SKIP (scope/out-of-build), not FAIL.
+  - --include-glob runs matching test directories via run-custom-test.
+USAGE
+}
+
+die(){ echo "ERROR: $*" >&2; exit 1; }
+
+QE_SRC="${QE_SRC:-}"
+QE_BUILD="${QE_BUILD:-}"
+BENCH_ROOT="/home/dl/bench/BENCH-QE-TESTSUITE-001"
+NPROCS=1
+SUBSET="all"
+INCLUDE_GLOB=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --qe-src) QE_SRC="$2"; shift 2 ;;
+    --qe-build) QE_BUILD="$2"; shift 2 ;;
+    --bench-root) BENCH_ROOT="$2"; shift 2 ;;
+    --nprocs) NPROCS="$2"; shift 2 ;;
+    --subset) SUBSET="$2"; shift 2 ;;
+    --include-glob) INCLUDE_GLOB="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ "$NPROCS" =~ ^[1-9][0-9]*$ ]] || die "--nprocs must be >=1"
+
+is_qe_src() {
+  local d="$1"
+  [[ -n "$d" && -d "$d/test-suite" && -f "$d/test-suite/Makefile" ]]
+}
+
+is_qe_build() {
+  local d="$1"
+  [[ -n "$d" && -x "$d/bin/pw.x" ]]
+}
+
+autodetect_qe_src() {
+  local pref
+  for pref in \
+    "$HOME/.cache/sg/qe-gpu-src/src/qe-7.5/q-e-qe-7.5" \
+    "$HOME/.cache/sg/qe-gpu-src/src/q-e-qe-7.5" \
+    "$HOME/.cache/sg/qe-gpu-src-u/qe-src" \
+    "/opt/sg/src/q-e_qe-7.5" \
+    "$HOME/.cache/sg/qe-gpu-src/src/q-e-qe-7.3.1"
+  do
+    if is_qe_src "$pref"; then
+      echo "$pref"
+      return 0
+    fi
+  done
+
+  local roots=("$HOME/.cache/sg" "/opt/sg/src")
+  local mk
+  for root in "${roots[@]}"; do
+    [[ -d "$root" ]] || continue
+    mk="$(find "$root" -maxdepth 7 -type f -path '*/test-suite/Makefile' 2>/dev/null | grep -v '/build/' | head -n 1 || true)"
+    if [[ -n "$mk" ]]; then
+      echo "${mk%/test-suite/Makefile}"
+      return 0
+    fi
+  done
+  for root in "${roots[@]}"; do
+    [[ -d "$root" ]] || continue
+    mk="$(find "$root" -maxdepth 7 -type f -path '*/test-suite/Makefile' 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$mk" ]]; then
+      echo "${mk%/test-suite/Makefile}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+autodetect_qe_build() {
+  local cand
+  for cand in \
+    "${QE_SRC}" \
+    "$HOME/.local/sg/qe-gpu-src/qe-7.5" \
+    "$HOME/.cache/sg/qe-gpu-src/build/q-e-qe-7.5-nvhpc-cc80" \
+    "$HOME/.cache/sg/qe-gpu-src/build/qe-7.5-nvhpc-cc80/q-e-qe-7.5" \
+    "/opt/sg/src/q-e_qe-7.5"
+  do
+    if is_qe_build "$cand"; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "$QE_SRC" ]]; then QE_SRC="$(autodetect_qe_src || true)"; fi
+is_qe_src "$QE_SRC" || die "QE source tree not found. Use --qe-src DIR"
+if [[ -z "$QE_BUILD" ]]; then QE_BUILD="$(autodetect_qe_build || true)"; fi
+is_qe_build "$QE_BUILD" || die "QE build dir not found or bin/pw.x missing. Use --qe-build DIR"
+
+TS="$(date +%Y%m%d_%H%M%S)"
+WORKROOT="${BENCH_ROOT}/work/qe_testsuite_${TS}"
+LOGROOT="${BENCH_ROOT}/logs/qe_testsuite_${TS}"
+mkdir -p "$WORKROOT" "$LOGROOT" || die "failed to create output dirs under bench-root: $BENCH_ROOT"
+
+RUN_LOG="${LOGROOT}/run-tests.log"
+SUMMARY="${LOGROOT}/summary.txt"
+FAILURES="${LOGROOT}/failures.txt"
+CMD_LOG="${LOGROOT}/command.txt"
+SUITE_TSV="${LOGROOT}/suite_results.tsv"
+
+TESTSUITE_DIR="${QE_SRC}/test-suite"
+MPI_PREF="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/comm_libs/12.9/hpcx/hpcx-2.22.1/ompi/bin"
+NVHPC_ROOT="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7"
+NVCOMPILER_COMM_LIBS_HOME="${NVHPC_ROOT}/comm_libs/12.9"
+NVHPC_CUDA_HOME="${NVHPC_ROOT}/cuda/12.9"
+
+suite_target() {
+  case "$1" in
+    pw) echo "run-tests-pw" ;;
+    cp) echo "run-tests-cp" ;;
+    ph) echo "run-tests-ph" ;;
+    pp) echo "run-tests-pp" ;;
+    hp) echo "run-tests-hp" ;;
+    tddfpt) echo "run-tests-tddfpt" ;;
+    kcw) echo "run-tests-kcw" ;;
+    pioud) echo "run-tests-pioud" ;;
+    *) echo "" ;;
+  esac
+}
+
+suite_requirements() {
+  case "$1" in
+    pw) echo "pw.x" ;;
+    cp) echo "cp.x" ;;
+    ph) echo "ph.x q2r.x matdyn.x" ;;
+    pp) echo "pp.x projwfc.x" ;;
+    hp) echo "hp.x" ;;
+    tddfpt) echo "turbo_lanczos.x" ;;
+    kcw) echo "kcw.x" ;;
+    pioud) echo "pw.x" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Build suite list
+SUITES=()
+if [[ -n "$INCLUDE_GLOB" ]]; then
+  while IFS= read -r d; do
+    SUITES+=("custom:${d##*/}")
+  done < <(find "$TESTSUITE_DIR" -maxdepth 1 -type d -name "$INCLUDE_GLOB" | sort)
+  [[ ${#SUITES[@]} -gt 0 ]] || die "--include-glob matched no test directories: $INCLUDE_GLOB"
+else
+  if [[ "$SUBSET" == "all" ]]; then
+    SUITES=(pw cp ph pp hp tddfpt kcw pioud)
+  else
+    IFS=',' read -r -a SUITES <<< "$SUBSET"
+  fi
+fi
+
+{
+  echo "timestamp=${TS}"
+  echo "host=$(hostname)"
+  echo "qe_src=${QE_SRC}"
+  echo "qe_build=${QE_BUILD}"
+  echo "testsuite_dir=${TESTSUITE_DIR}"
+  echo "nprocs=${NPROCS}"
+  echo "subset=${SUBSET}"
+  echo "include_glob=${INCLUDE_GLOB}"
+  echo "PATH(prepend)=${MPI_PREF}"
+  echo "NVCOMPILER_COMM_LIBS_HOME=${NVCOMPILER_COMM_LIBS_HOME}"
+  echo "NVHPC_CUDA_HOME=${NVHPC_CUDA_HOME}"
+  echo "suites=${SUITES[*]}"
+} > "$CMD_LOG"
+
+{
+  echo "== sg-qe-run-test-suite =="
+  echo "QE_SRC   : $QE_SRC"
+  echo "QE_BUILD : $QE_BUILD"
+  echo "WORKROOT : $WORKROOT"
+  echo "LOGROOT  : $LOGROOT"
+  echo "NPROCS   : $NPROCS"
+  echo "SUBSET   : $SUBSET"
+  [[ -n "$INCLUDE_GLOB" ]] && echo "INCLUDE_GLOB: $INCLUDE_GLOB"
+} | tee "$RUN_LOG"
+
+pass_total=0
+fail_total=0
+skip_total=0
+run_rc=0
+skip_reasons=()
+error_patterns_file="${LOGROOT}/error_patterns.tsv"
+: > "$error_patterns_file"
+echo -e "suite\tstatus\tpass\tfail\tnote" > "$SUITE_TSV"
+
+run_one_suite() {
+  local suite="$1"
+  local tmp="${LOGROOT}/suite_${suite//[:\/]/_}.log"
+  local rc=0
+  local p=0
+  local f=0
+  local note=""
+  local target=""
+
+  if [[ "$suite" == custom:* ]]; then
+    local testdir="${suite#custom:}"
+    target="run-custom-test"
+    {
+      echo ""
+      echo "### SUITE custom:$testdir"
+      echo "CMD: make NPROCS=${NPROCS} ESPRESSO_BUILD=${QE_BUILD} run-custom-test testdir=${testdir}"
+    } | tee -a "$RUN_LOG"
+    (
+      cd "$TESTSUITE_DIR"
+      export PATH="${MPI_PREF}:$PATH"
+      export NVCOMPILER_COMM_LIBS_HOME="$NVCOMPILER_COMM_LIBS_HOME"
+      export NVHPC_CUDA_HOME="$NVHPC_CUDA_HOME"
+      make NPROCS="$NPROCS" ESPRESSO_BUILD="$QE_BUILD" run-custom-test testdir="$testdir"
+    ) > "$tmp" 2>&1 || rc=$?
+  else
+    target="$(suite_target "$suite")"
+    [[ -n "$target" ]] || {
+      skip_total=$((skip_total+1))
+      note="unknown suite token"
+      skip_reasons+=("${suite}: ${note}")
+      echo -e "${suite}\tSKIP\t0\t0\t${note}" >> "$SUITE_TSV"
+      return 0
+    }
+
+    local req missing=()
+    for req in $(suite_requirements "$suite"); do
+      [[ -x "${QE_BUILD}/bin/${req}" ]] || missing+=("${req}")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      skip_total=$((skip_total+1))
+      note="missing binaries: ${missing[*]}"
+      skip_reasons+=("${suite}: ${note}")
+      {
+        echo ""
+        echo "### SUITE ${suite}"
+        echo "SKIP: ${note}"
+      } | tee -a "$RUN_LOG"
+      echo -e "${suite}\tSKIP\t0\t0\t${note}" >> "$SUITE_TSV"
+      return 0
+    fi
+
+    {
+      echo ""
+      echo "### SUITE ${suite}"
+      echo "CMD: make NPROCS=${NPROCS} ESPRESSO_BUILD=${QE_BUILD} ${target}"
+    } | tee -a "$RUN_LOG"
+    (
+      cd "$TESTSUITE_DIR"
+      export PATH="${MPI_PREF}:$PATH"
+      export NVCOMPILER_COMM_LIBS_HOME="$NVCOMPILER_COMM_LIBS_HOME"
+      export NVHPC_CUDA_HOME="$NVHPC_CUDA_HOME"
+      make NPROCS="$NPROCS" ESPRESSO_BUILD="$QE_BUILD" "$target"
+    ) > "$tmp" 2>&1 || rc=$?
+  fi
+
+  cat "$tmp" >> "$RUN_LOG"
+
+  read -r p f < <(
+    python3 - "$tmp" <<'PY'
+import re,sys
+text=open(sys.argv[1],encoding='utf-8',errors='ignore').read()
+passed=0
+failed=0
+m=list(re.finditer(r'(\d+)\s+out of\s+(\d+)\s+tests?\s+passed',text,re.I))
+if m:
+    passed=int(m[-1].group(1)); total=int(m[-1].group(2)); failed=max(0,total-passed)
+else:
+    passed=sum(int(x) for x in re.findall(r'Passed:\s*(\d+)',text))
+    failed=sum(int(x) for x in re.findall(r'Failed:\s*(\d+)',text))
+print(f"{passed} {failed}")
+PY
+  )
+
+  pass_total=$((pass_total + p))
+  fail_total=$((fail_total + f))
+  if [[ "$rc" -ne 0 ]]; then run_rc=1; fi
+
+  if [[ "$f" -gt 0 || "$rc" -ne 0 ]]; then
+    echo -e "${suite}\tFAIL\t${p}\t${f}\trc=${rc}" >> "$SUITE_TSV"
+  else
+    echo -e "${suite}\tPASS\t${p}\t${f}\trc=${rc}" >> "$SUITE_TSV"
+  fi
+
+  # collect top error lines for this suite
+  python3 - "$tmp" "$suite" >> "$error_patterns_file" <<'PY'
+import re,sys,collections
+path,suite=sys.argv[1],sys.argv[2]
+text=open(path,encoding='utf-8',errors='ignore').read().splitlines()
+pat=[]
+for ln in text:
+    s=ln.strip()
+    if not s: continue
+    if '**FAILED**' in s:
+        pat.append('testcase FAILED')
+    elif 'Different sets of data extracted from benchmark and test.' in s:
+        pat.append('Different sets of data extracted from benchmark and test')
+    elif 'Data only in benchmark:' in s:
+        pat.append('Data only in benchmark')
+    elif 'Error' in s or 'ERROR' in s:
+        pat.append('ERROR line')
+c=collections.Counter(pat)
+for k,v in c.items():
+    print(f"{suite}\t{k}\t{v}")
+PY
+}
+
+for s in "${SUITES[@]}"; do
+  run_one_suite "$s"
+done
+
+# failures extraction (compact)
+{
+  rg -n -i "\*\*FAILED\*\*|Different sets of data extracted|Data only in benchmark|CRASH|segmentation|timed out|MPI_ABORT|cuMemHostRegister|unable to launch|could not access or execute an executable" "$RUN_LOG" || true
+  echo
+  echo "# CRASH files under test-suite"
+  find "$TESTSUITE_DIR" -type f -name 'CRASH*' 2>/dev/null | sed "s#^${TESTSUITE_DIR}/##" || true
+} > "$FAILURES"
+
+# representative errors top 10
+top_errors="$LOGROOT/top_errors.tsv"
+python3 - "$error_patterns_file" > "$top_errors" <<'PY'
+import sys,collections
+c=collections.Counter()
+with open(sys.argv[1],encoding='utf-8',errors='ignore') as f:
+    for line in f:
+        parts=line.rstrip('\n').split('\t')
+        if len(parts)!=3: continue
+        _,msg,n=parts
+        try: n=int(n)
+        except: n=1
+        c[msg]+=n
+print('count\tpattern')
+for msg,n in c.most_common(10):
+    print(f"{n}\t{msg}")
+PY
+
+status="PASS"
+if [[ "$run_rc" -ne 0 || "$fail_total" -gt 0 ]]; then
+  status="FAIL"
+fi
+if [[ "$pass_total" -eq 0 && "$fail_total" -eq 0 && "$skip_total" -gt 0 ]]; then
+  status="SKIP"
+fi
+
+{
+  echo "WORKROOT: $WORKROOT"
+  echo "LOGROOT : $LOGROOT"
+  echo "QE_SRC  : $QE_SRC"
+  echo "QE_BUILD: $QE_BUILD"
+  echo "NPROCS  : $NPROCS"
+  echo "SUBSET  : $SUBSET"
+  [[ -n "$INCLUDE_GLOB" ]] && echo "INCLUDE_GLOB: $INCLUDE_GLOB"
+  echo "RC      : $run_rc"
+  echo "PASS_COUNT: $pass_total"
+  echo "FAIL_COUNT: $fail_total"
+  echo "SKIP_COUNT: $skip_total"
+  echo "STATUS  : $status"
+  echo ""
+  echo "-- suite results --"
+  cat "$SUITE_TSV"
+  echo ""
+  if [[ ${#skip_reasons[@]} -gt 0 ]]; then
+    echo "-- skip reasons --"
+    printf '%s\n' "${skip_reasons[@]}"
+    echo ""
+  fi
+  echo "-- top error patterns --"
+  cat "$top_errors"
+  echo ""
+  echo "--- tail -n 120 run-tests.log ---"
+  tail -n 120 "$RUN_LOG" || true
+  echo "--- end ---"
+} > "$SUMMARY"
+
+ZIP="${BENCH_ROOT}/qe_testsuite_${TS}.zip"
+if command -v zip >/dev/null 2>&1; then
+  (
+    cd "$BENCH_ROOT"
+    zip -r "$ZIP" "work/qe_testsuite_${TS}" "logs/qe_testsuite_${TS}" >/dev/null
+  )
+  echo "ZIP: $ZIP" >> "$SUMMARY"
+else
+  echo "WARN: zip not found; archive skipped" >> "$SUMMARY"
+fi
+
+echo "Summary: $SUMMARY"
