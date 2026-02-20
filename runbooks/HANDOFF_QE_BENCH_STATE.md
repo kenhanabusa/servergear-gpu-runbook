@@ -226,3 +226,14 @@ WORK_K222=/home/dl/bench/BENCH-QE-LLZO-SCF-001/20260219_092728/work/ngc_k222_202
   - summary_all: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_all.txt`
   - summary_bench2: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_bench2.txt`
   - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260220_163805.zip`
+
+## Update (2026-02-21)
+- entrypoint smoke report:
+  - `runbooks/QE_ENTRYPOINT_SMOKE.md`
+- QE install (cc auto + sm log):
+  - install log dir: `/home/dl/.cache/sg/logs/sg-qe-gpu-src-u`
+  - sm proof: `/home/dl/.cache/sg/logs/sg-qe-gpu-src-u/pw_sm_arch.txt` (`sm_80`)
+- no-args bench run (`--auto-scale` default):
+  - summary: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary.txt`
+  - summary_all: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_all.txt`
+  - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260221_064926.zip`

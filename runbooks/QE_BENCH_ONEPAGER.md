@@ -13,13 +13,13 @@
 
 ## 結果（latest: `summary_all.txt` / `summary_bench2.txt`）
 Source:
-- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_all.txt`
-- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_bench2.txt`
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_all.txt`
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_bench2.txt`
 
 | Condition | Native QE 7.5 WALL | NGC 7.3.1 WALL | Native speedup vs NGC |
 |---|---:|---:|---:|
-| np1 / nk1 | 30.84s | 35.07s | 1.14x |
-| np4 / nk4 | 9.92s | 11.53s | 1.16x |
+| np1 / nk1 | 30.92s | 34.83s | 1.13x |
+| np4 / nk4 | 9.82s | 11.51s | 1.17x |
 
 ## 再現コマンド（1行）
 Native:
@@ -36,3 +36,5 @@ docker run --rm --gpus all --ipc=host --network=host -w /work -v "$PWD:/work" -e
 - `k=1` は native/NGC の同条件比較用。
 - `k=2x2x2` はスケーリング検証用（用途を分離）。
 - NGC は MCA profile を固定して比較する（`ob1+tcp+eth0`, `coll ^hcoll`）。
+- ベンチコマンドは無引数で起動可能（既定で `epw_metal_bench_heavy`）。
+- 既定で `--auto-scale` 有効（`1,2,4,8...` をGPU枚数上限まで、最大8）。

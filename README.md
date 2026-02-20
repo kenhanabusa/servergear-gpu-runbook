@@ -65,14 +65,25 @@ Handoff（再開用要約）: `runbooks/HANDOFF_QE_BENCH_STATE.md`
 
 ### 実行例
 ```bash
-tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc \
-  --preset epw_metal_bench_heavy \
-  --bench-root /home/dl/bench/BENCH-QE-TESTCASE-PILOT-001
+tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc
+```
+
+- 無引数で起動可能（既定: `--preset epw_metal_bench_heavy`）。
+- 既定で `--auto-scale` 有効（`1,2,4,8...` をGPU枚数上限まで、最大8）。
+- `--no-auto-scale` で従来の `np1/np4` 実行に固定可能。
+
+```bash
+# 明示例
+tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc --no-auto-scale --np1 1 --np4 4
 ```
 
 ### MCA プロファイル
 - 既定は `ob1-tcp-eth0`（`ob1 + tcp + eth0固定 + coll ^hcoll`）です。
 - `ob1-tcp` / `ucx` / `smcuda` は明示指定時のみ使用します。
+
+### QE Build（cc自動）
+- `tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u` は既定で `nvidia-smi` から compute capability を自動検出し、`--with-cuda-cc` に反映します。
+- ビルド後に `pw.x` の `sm_XX` を `LOGDIR/pw_sm_arch.txt` に記録します。
 
 ### 出力構造
 - work: `bench-root/work/bench_qe_vs_ngc_YYYYmmdd_HHMMSS/`

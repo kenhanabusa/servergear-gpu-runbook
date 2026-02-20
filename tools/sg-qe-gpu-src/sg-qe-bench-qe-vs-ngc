@@ -7,21 +7,24 @@ Usage:
   sg-qe-bench-qe-vs-ngc [--preset epw_metal_bench_heavy]
                         [--bench-root DIR] [--input FILE]
                         [--np1 N] [--np4 N]
+                        [--auto-scale|--no-auto-scale] [--max-scale N]
                         [--native-qe-prefix DIR]
                         [--ngc-image IMAGE] [--ngc-pw PATH]
                         [--mca-profile ob1-tcp-eth0|ob1-tcp|ucx|smcuda]
 
 Defaults:
-  --preset             (none)
+  --preset             epw_metal_bench_heavy
   --np1                1
   --np4                4
+  --auto-scale         on (1,2,4,8... up to GPU count, max 8)
+  --max-scale          8
   --native-qe-prefix   \$HOME/.local/sg/qe-gpu-src/qe-7.5
   --ngc-image          nvcr.io/hpc/quantum_espresso:qe-7.3.1
   --ngc-pw             /usr/local/qe/bin/pw.x
   --mca-profile        ob1-tcp-eth0 (stable default)
 
 Notes:
-  - fixed comparison: np1 uses -nk 1, np4 uses -nk 4
+  - fixed comparison: npN uses -nk N
   - mpirun pinning is unified: --bind-to core --map-by slot --rank-by slot
   - rank->GPU is fixed by OMPI local rank (CUDA_VISIBLE_DEVICES=local_rank)
   - nvidia-smi log is sampled every 1s per run.
@@ -30,11 +33,13 @@ USAGE
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 
-PRESET=""
+PRESET="epw_metal_bench_heavy"
 BENCH_ROOT=""
 INPUT=""
 NP1=1
 NP4=4
+AUTO_SCALE=1
+MAX_SCALE=8
 NATIVE_QE_PREFIX="${HOME}/.local/sg/qe-gpu-src/qe-7.5"
 NGC_IMAGE="nvcr.io/hpc/quantum_espresso:qe-7.3.1"
 NGC_PW="/usr/local/qe/bin/pw.x"
@@ -50,6 +55,9 @@ while [[ $# -gt 0 ]]; do
     --input) INPUT="$2"; shift 2;;
     --np1) NP1="$2"; shift 2;;
     --np4) NP4="$2"; shift 2;;
+    --auto-scale) AUTO_SCALE=1; shift 1;;
+    --no-auto-scale) AUTO_SCALE=0; shift 1;;
+    --max-scale) MAX_SCALE="$2"; shift 2;;
     --native-qe-prefix) NATIVE_QE_PREFIX="$2"; shift 2;;
     --ngc-image) NGC_IMAGE="$2"; shift 2;;
     --ngc-pw) NGC_PW="$2"; shift 2;;
@@ -58,6 +66,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
+
+[[ "$MAX_SCALE" =~ ^[1-9][0-9]*$ ]] || die "--max-scale must be >=1"
 
 if [[ -n "$PRESET" ]]; then
   case "$PRESET" in
@@ -122,6 +132,36 @@ have_nvidia_smi=0
 if command -v nvidia-smi >/dev/null 2>&1; then
   have_nvidia_smi=1
 fi
+
+detect_gpu_count() {
+  if [[ "$have_nvidia_smi" -eq 1 ]]; then
+    local c
+    c="$(nvidia-smi --list-gpus 2>/dev/null | wc -l | tr -d '[:space:]')"
+    if [[ "$c" =~ ^[1-9][0-9]*$ ]]; then
+      echo "$c"
+      return 0
+    fi
+  fi
+  echo "1"
+}
+
+build_scale_list() {
+  local gpus="$1"
+  local n=1
+  local lim="$MAX_SCALE"
+  local out=()
+  if [[ "$AUTO_SCALE" -eq 0 ]]; then
+    out+=("$NP1")
+    if [[ "$NP4" != "$NP1" ]]; then out+=("$NP4"); fi
+  else
+    if (( gpus < lim )); then lim="$gpus"; fi
+    while (( n <= lim )); do
+      out+=("$n")
+      n=$((n*2))
+    done
+  fi
+  printf '%s\n' "${out[@]}" | awk '!seen[$0]++'
+}
 
 start_smi_log() {
   local out="$1"
@@ -282,6 +322,9 @@ echo "WORKROOT: $WORKROOT" | tee -a "$SUMMARY"
 echo "LOGROOT : $LOGROOT" | tee -a "$SUMMARY"
 echo "INPUT   : $INPUT" | tee -a "$SUMMARY"
 echo "PROFILE : $MCA_PROFILE" | tee -a "$SUMMARY"
+GPU_COUNT="$(detect_gpu_count)"
+echo "GPUS    : $GPU_COUNT" | tee -a "$SUMMARY"
+echo "AUTO_SCALE: $AUTO_SCALE (max=$MAX_SCALE)" | tee -a "$SUMMARY"
 echo "" >> "$SUMMARY"
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -290,13 +333,18 @@ else
   die "sha256sum not found"
 fi
 
-run_native_case "${LABEL_PREFIX}_native_np1_nk1" "$NP1" 1
-run_native_case "${LABEL_PREFIX}_native_np4_nk4" "$NP4" 4
+mapfile -t SCALE_LIST < <(build_scale_list "$GPU_COUNT")
+[[ "${#SCALE_LIST[@]}" -gt 0 ]] || die "empty scale list"
+
+for np in "${SCALE_LIST[@]}"; do
+  run_native_case "${LABEL_PREFIX}_native_np${np}_nk${np}" "$np" "$np"
+done
 
 case "$MCA_PROFILE" in
   ob1-tcp-eth0|ob1-tcp|ucx|smcuda)
-    run_ngc_case "${LABEL_PREFIX}_ngc_np1_nk1_${MCA_PROFILE}" "$NP1" 1 "$MCA_PROFILE"
-    run_ngc_case "${LABEL_PREFIX}_ngc_np4_nk4_${MCA_PROFILE}" "$NP4" 4 "$MCA_PROFILE"
+    for np in "${SCALE_LIST[@]}"; do
+      run_ngc_case "${LABEL_PREFIX}_ngc_np${np}_nk${np}_${MCA_PROFILE}" "$np" "$np" "$MCA_PROFILE"
+    done
     ;;
   *)
     die "unknown --mca-profile: $MCA_PROFILE"
