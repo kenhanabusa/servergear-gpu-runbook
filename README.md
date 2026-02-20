@@ -59,6 +59,11 @@ Onepager: `runbooks/QE_BENCH_ONEPAGER.md`
 
 Handoff（再開用要約）: `runbooks/HANDOFF_QE_BENCH_STATE.md`
 
+運用ガイド:
+- Install layout: `runbooks/QE_INSTALL_LAYOUT.md`
+- Update（ZIP標準 / Git任意）: `runbooks/QE_UPDATE.md`
+- Support（最小証跡）: `runbooks/QE_SUPPORT.md`
+
 運用ルール（重要）:
 - `k=1` は **同条件比較** 用（native/NGCの横比較）
 - `k=2x2x2` は **スケーリング検証** 用（`-nk` を使った並列効率確認）
@@ -70,6 +75,7 @@ tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc
 
 - 無引数で起動可能（既定: `--preset epw_metal_bench_heavy`）。
 - 既定は native-only（NGC未実行）。
+- NGC比較は optional（デフォルトOFF）。
 - 既定で `--auto-scale` 有効（`1,2,4,8...` をGPU枚数上限まで、最大8）。
 - `--no-auto-scale` で従来の `np1/np4` 実行に固定可能。
 - NGCを回す場合のみ `--with-ngc --ngc-image <image>` を指定。
