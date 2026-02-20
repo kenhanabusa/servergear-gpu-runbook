@@ -22,6 +22,13 @@ sed -i "s#pseudo_dir\s*=\s*'[^']*'#pseudo_dir      = './pseudos/'#" "$CASE_DIR/i
 sed -i "s#outdir\s*=\s*'[^']*'#outdir          = './tmp/'#" "$CASE_DIR/input.in"
 ```
 
+Bench-heavy variant example (target np1 ~30s+):
+```bash
+cp "$CASE_DIR/input.in" "$CASE_DIR/input_bench_heavy.in"
+sed -i "s/^\\s*ecutwfc\\s*=.*/    ecutwfc         = 80/" "$CASE_DIR/input_bench_heavy.in"
+sed -i "s/^12 12 12 0 0 0/30 30 30 0 0 0/" "$CASE_DIR/input_bench_heavy.in"
+```
+
 ## 2) Same Conditions (Threads/Env)
 ```bash
 export OMP_NUM_THREADS=1
@@ -45,6 +52,13 @@ $MPIRUN -np 4 "$PW" -nk 4 -in input.in > "$LOG_DIR/native_np4_nk4.out" 2> "$LOG_
 ```
 
 ## 4) NGC QE 7.3.1 (Stable MCA)
+Default stable profile:
+- `--mca coll ^hcoll --mca pml ob1 --mca btl self,tcp --mca btl_tcp_if_include eth0 --mca oob_tcp_if_include eth0`
+
+Notes:
+- Start from the stable profile above (完走優先) and only then try faster profiles.
+- `ob1+tcp` without `eth0` pinning can hang/fail on this host in `np=4` cases.
+
 ```bash
 NGC_IMAGE=nvcr.io/hpc/quantum_espresso:qe-7.3.1
 cd "$CASE_DIR"

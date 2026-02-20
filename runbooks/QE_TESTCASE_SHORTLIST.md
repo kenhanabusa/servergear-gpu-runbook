@@ -51,6 +51,51 @@ Target: `epw_metal/scf.in` portable copy
 - Logs:
 - `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_scf_20260220_143444/summary_native.txt`
 
+## Native vs NGC Measurement (same conditions)
+Run:
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_145445/summary_all.txt`
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_145445/summary_bench2.txt`
+- Zip:
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260220_145445.zip`
+
+### Smoke input (`epw_metal/scf.in`, 12x12x12)
+- native `np1/nk1`: `3.44s WALL` (`JOB DONE`)
+- native `np4/nk4`: `1.38s WALL` (`JOB DONE`)
+- NGC(stable) `np1/nk1`: `3.54s WALL` (`JOB DONE`)
+- NGC(stable) `np4/nk4`: `1.61s WALL` (`JOB DONE`)
+- verdict: smokeでは native が僅差で勝ち（特に np4）。
+
+### Bench-derived v1 (`input_bench.in`, `ecutwfc=70`, `k=24x24x24`)
+- native `np1/nk1`: `15.52s WALL` (`JOB DONE`)
+- native `np4/nk4`: `5.47s WALL` (`JOB DONE`)
+- NGC(stable) `np1/nk1`: `18.42s WALL` (`JOB DONE`)
+- NGC(stable) `np4/nk4`: `6.42s WALL` (`JOB DONE`)
+- verdict: native が勝ち。比較可能だが still short (<30s)。
+
+### Bench-derived v2 (`input_bench_heavy.in`, `ecutwfc=80`, `k=30x30x30`)  **adopted**
+- native `np1/nk1`: `30.98s WALL` (`JOB DONE`)
+- native `np4/nk4`: `9.95s WALL` (`JOB DONE`)
+- NGC(stable) `np1/nk1`: `34.98s WALL` (`JOB DONE`)
+- NGC(stable) `np4/nk4`: `11.66s WALL` (`JOB DONE`)
+- verdict: 30–120s target達成（np1約31s）。native が np1/np4 ともに勝ち。
+
+### NGC optional profile check (smoke np4)
+- `ob1+tcp(eth0固定)` : `1.61s WALL`, `JOB DONE`
+- `ob1+tcp` (eth0未固定): `JOB DONEなし`（失敗/撤退）
+- conclusion: デフォルトは `ob1+tcp+eth0固定` を採用。
+
+## Positioning: Smoke vs Bench
+- smoke版: 最短の動作確認（数秒、回帰確認向き）
+- bench版: 比較向け（まだ短いが、相対差とnp1→np4傾向が見える）
+
+## Final Demo Case (current)
+- 採用: `epw_metal` portable + heavy bench派生（`input_bench_heavy.in`）
+- 理由:
+- k点が多く (`30x30x30`)、`nk=4` 比較が明確
+- native/NGC の双方で `JOB DONE` を再現
+- np1が約31秒でデモ用途に十分な計測時間
+- ログ/zip/入力ハッシュまで証跡化済み
+
 ## Portableization and Benchmark Flow
 Use `runbooks/QE_TESTCASE_RUN_TEMPLATE.md` for copy/portable steps and native+NGC commands.
 - Core rule:
