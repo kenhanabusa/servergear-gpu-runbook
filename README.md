@@ -60,6 +60,9 @@ Onepager: `runbooks/QE_BENCH_ONEPAGER.md`
 Handoff（再開用要約）: `runbooks/HANDOFF_QE_BENCH_STATE.md`
 
 運用ガイド:
+- Distribution Quick Start: `runbooks/QE_DISTRIBUTION_QUICKSTART.md`
+- Proof Pack Index: `runbooks/QE_PROOF_PACK_INDEX.md`
+- LP Copy: `runbooks/QE_LP_COPY.md`
 - Install layout: `runbooks/QE_INSTALL_LAYOUT.md`
 - Update（ZIP標準 / Git任意）: `runbooks/QE_UPDATE.md`
 - Support（最小証跡）: `runbooks/QE_SUPPORT.md`

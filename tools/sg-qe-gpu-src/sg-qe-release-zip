@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-qe-release-zip [--out-dir DIR] [--name NAME]
+
+Defaults:
+  --out-dir  <repo>/dist
+  --name     qe_runbook_<YYYYmmdd_HHMMSS>_<short-commit>
+USAGE
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+command -v git >/dev/null 2>&1 || die "git not found"
+command -v zip >/dev/null 2>&1 || die "zip not found"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found"
+command -v tar >/dev/null 2>&1 || die "tar not found"
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$REPO_ROOT" ]] || die "not inside a git repository"
+
+OUT_DIR="${REPO_ROOT}/dist"
+NAME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
+    --name) NAME="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+TS="$(date +%Y%m%d_%H%M%S)"
+SHORT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+[[ -n "$NAME" ]] || NAME="qe_runbook_${TS}_${SHORT_COMMIT}"
+ZIP_PATH="${OUT_DIR}/${NAME}.zip"
+ZIP_SHA_PATH="${ZIP_PATH}.sha256"
+
+INCLUDE_PATHS=(
+  "README.md"
+  "tools/sg-qe-gpu-src/sg-qe-verify-scf"
+  "tools/sg-qe-gpu-src/sg-qe-run-test-suite"
+  "tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc"
+  "tools/sg-qe-gpu-src-u/sg-lib.sh"
+  "tools/sg-qe-gpu-src-u/sg-doctor-qe-gpu-src-u"
+  "tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u"
+  "tools/sg-qe-gpu-src-u/sg-verify-qe-gpu-src-u"
+  "tools/sg-qe-gpu-src-u/sg-remove-qe-gpu-src-u"
+  "runbooks/QE_DISTRIBUTION_QUICKSTART.md"
+  "runbooks/QE_PROOF_PACK_INDEX.md"
+  "runbooks/QE_LP_COPY.md"
+  "runbooks/QE_INSTALL_LAYOUT.md"
+  "runbooks/QE_UPDATE.md"
+  "runbooks/QE_SUPPORT.md"
+  "runbooks/QE_ENTRYPOINT_SMOKE.md"
+  "runbooks/QE_BENCH_ONEPAGER.md"
+  "runbooks/QE_TESTSUITE_PW_PROOF.md"
+  "runbooks/HANDOFF_QE_BENCH_STATE.md"
+  "runbooks/HANDOFF_QE_TESTSUITE.md"
+)
+
+for p in "${INCLUDE_PATHS[@]}"; do
+  [[ -f "${REPO_ROOT}/${p}" ]] || die "missing required file: ${p}"
+done
+
+mkdir -p "$OUT_DIR"
+WORKDIR="$(mktemp -d /tmp/sg-qe-release.XXXXXX)"
+cleanup() { rm -rf "$WORKDIR"; }
+trap cleanup EXIT
+
+PKG_ROOT="${WORKDIR}/${NAME}"
+mkdir -p "$PKG_ROOT"
+
+(cd "$REPO_ROOT" && tar -cf - "${INCLUDE_PATHS[@]}") | (cd "$PKG_ROOT" && tar -xf -)
+
+MANIFEST="${PKG_ROOT}/manifest.txt"
+SHA_FILE="${PKG_ROOT}/SHA256SUMS.txt"
+
+{
+  echo "name=${NAME}"
+  echo "generated_at=$(date -Iseconds)"
+  echo "git_commit=$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  echo "git_branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
+  if git -C "$REPO_ROOT" diff --quiet && git -C "$REPO_ROOT" diff --cached --quiet; then
+    echo "git_dirty=no"
+  else
+    echo "git_dirty=yes"
+  fi
+  echo "host=$(hostname)"
+  echo "user=${USER:-unknown}"
+  echo "uname=$(uname -srmo 2>/dev/null || uname -a)"
+  echo "bash=$(bash --version | head -n 1)"
+  echo "include_count=${#INCLUDE_PATHS[@]}"
+  echo "exclude_notes=.git/, dist/, tools/_bak/, non-QE runbooks, temporary backups"
+  echo ""
+  echo "[file_list]"
+  (cd "$PKG_ROOT" && find . -type f | sed 's#^\./##' | sort)
+} > "$MANIFEST"
+
+(cd "$PKG_ROOT" && find . -type f ! -name 'SHA256SUMS.txt' | sed 's#^\./##' | sort | xargs -r sha256sum) > "$SHA_FILE"
+
+mapfile -t ZIP_INPUTS < <(cd "$WORKDIR" && find "$NAME" -type f | sort)
+[[ "${#ZIP_INPUTS[@]}" -gt 0 ]] || die "empty staging files"
+(cd "$WORKDIR" && zip -X -q "$ZIP_PATH" "${ZIP_INPUTS[@]}")
+
+sha256sum "$ZIP_PATH" > "$ZIP_SHA_PATH"
+
+echo "OK"
+echo "ZIP: $ZIP_PATH"
+echo "ZIP_SHA256: $ZIP_SHA_PATH"
