@@ -52,6 +52,40 @@ sg-verify-gpu
 
 ---
 
+## QE Bench (Native vs NGC)
+ネイティブ QE 7.5 と NGC QE 7.3.1 を **同条件** で比較するためのベンチ実行スクリプトです。
+np=4 は **必ず `-nk 1`** で統一し、pinning は `mpirun --bind-to core --map-by slot` に固定します。
+
+### 実行例
+```bash
+tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc \
+  --bench-root /home/dl/bench/BENCH-QE-LLZO-SCF-001/20260219_092728 \
+  --input /home/dl/bench/BENCH-QE-LLZO-SCF-001/20260219_092728/work/llzo96.in \
+  --np1 1 \
+  --np4 4 \
+  --native-qe-prefix /home/dl/.local/sg/qe-gpu-src/qe-7.5 \
+  --ngc-image nvcr.io/hpc/quantum_espresso:qe-7.3.1 \
+  --mca-profile auto
+```
+
+### MCA プロファイル
+- `auto` は **安定優先** の fallback を実施します。
+  1. `ob1-tcp-eth0`
+  2. `ob1-tcp`
+- `ucx` / `smcuda` は **実験扱い** で、明示指定時のみ使用します。
+
+### 出力構造
+- work: `bench-root/work/bench_qe_vs_ngc_YYYYmmdd_HHMMSS/`
+  - `native_np1/`, `native_np4/`, `ngc_np1_*`, `ngc_np4_*`
+  - 各ケースの `*.out`, `*.err`, `input.in`, `pseudos/`
+- logs: `bench-root/logs/bench_qe_vs_ngc_YYYYmmdd_HHMMSS/`
+  - `summary.txt`（JOB DONE / PWSCF WALL / rc）
+  - `*_nvidia_smi.csv`（1s 間隔）
+  - `*.log`（実行コマンドと環境）
+- zip: `bench-root/bench_qe_vs_ngc_YYYYmmdd_HHMMSS.zip`
+
+---
+
 ## 相談が早いケース（有償）
 - 本番環境で失敗できない / 期限がある
 - Secure Boot / DKMS / Kernel差分で詰まる
