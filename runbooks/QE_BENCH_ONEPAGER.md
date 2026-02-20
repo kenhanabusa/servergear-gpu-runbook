@@ -38,3 +38,10 @@ docker run --rm --gpus all --ipc=host --network=host -w /work -v "$PWD:/work" -e
 - NGC は MCA profile を固定して比較する（`ob1+tcp+eth0`, `coll ^hcoll`）。
 - ベンチコマンドは無引数で起動可能（既定で `epw_metal_bench_heavy`）。
 - 既定で `--auto-scale` 有効（`1,2,4,8...` をGPU枚数上限まで、最大8）。
+- 既定は native-only。NGCは `--with-ngc --ngc-image <image>` 指定時のみ実行。
+
+## Update (2026-02-21)
+- no-args bench (default native-only + auto-scale):
+  - summary: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_073036/summary.txt`
+  - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260221_073036.zip`
+  - summary includes: `NGC: SKIP (image not provided / docker not available)`

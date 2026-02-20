@@ -9,6 +9,12 @@ WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
 LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
 MODE="${1:-}"
 
+if [ -z "$MODE" ]; then
+  echo "Usage: $0 --single|--multi" >&2
+  echo "SAFE BLOCK: no-args mode does not assume installed pseudo/input. Choose --single or --multi explicitly." >&2
+  exit "$EC_OK"
+fi
+
 safe_prefix_or_die "$PREFIX"
 mkdirp "$WORKDIR" "$LOGDIR"
 

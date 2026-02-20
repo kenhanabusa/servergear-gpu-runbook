@@ -233,7 +233,8 @@ WORK_K222=/home/dl/bench/BENCH-QE-LLZO-SCF-001/20260219_092728/work/ngc_k222_202
 - QE install (cc auto + sm log):
   - install log dir: `/home/dl/.cache/sg/logs/sg-qe-gpu-src-u`
   - sm proof: `/home/dl/.cache/sg/logs/sg-qe-gpu-src-u/pw_sm_arch.txt` (`sm_80`)
-- no-args bench run (`--auto-scale` default):
-  - summary: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary.txt`
-  - summary_all: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_all.txt`
-  - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260221_064926.zip`
+  - cc policy: `--cuda-cc-policy min|max`（default=min, 互換優先）
+- no-args bench run (default native-only + auto-scale):
+  - summary: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_073036/summary.txt`
+  - zip: `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/epw_metal_vs_ngc_20260221_073036.zip`
+  - summary note: `NGC: SKIP (image not provided / docker not available)`

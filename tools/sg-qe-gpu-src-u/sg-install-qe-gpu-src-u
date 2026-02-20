@@ -4,10 +4,47 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=sg-lib.sh
 source "$HERE/sg-lib.sh"
 
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-install-qe-gpu-src-u [--cuda-cc-policy min|max]
+
+Options:
+  --cuda-cc-policy min|max
+      Auto select policy when multiple GPUs are present.
+      min: choose the lowest compute capability (compatibility-first, default)
+      max: choose the highest compute capability (performance-first)
+USAGE
+}
+
 PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
 WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
 LOGDIR="${LOGDIR:-$DEFAULT_LOGDIR}"
 JOBS="${JOBS:-$DEFAULT_JOBS}"
+CUDA_CC_POLICY="${CUDA_CC_POLICY:-min}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cuda-cc-policy)
+      CUDA_CC_POLICY="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "$EC_ACTION" "unknown arg: $1"
+      ;;
+  esac
+done
+
+case "$CUDA_CC_POLICY" in
+  min|max) ;;
+  *)
+    die "$EC_ACTION" "--cuda-cc-policy must be min or max (got: $CUDA_CC_POLICY)"
+    ;;
+esac
 
 safe_prefix_or_die "$PREFIX"
 mkdirp "$WORKDIR" "$LOGDIR"
@@ -15,6 +52,7 @@ mkdirp "$WORKDIR" "$LOGDIR"
 log "PREFIX=$PREFIX"
 log "WORKDIR=$WORKDIR"
 log "LOGDIR=$LOGDIR"
+log "CUDA_CC_POLICY=$CUDA_CC_POLICY"
 
 # deps check
 if ! command -v git >/dev/null 2>&1; then
@@ -94,20 +132,32 @@ detect_cuda_cc() {
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     return 1
   fi
-  local raw cc
-  raw="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
-  if [ -z "$raw" ]; then
+  local raw_list cc_list
+  raw_list="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -z "$raw_list" ]; then
     return 1
   fi
-  cc="${raw/./}"
-  if [[ "$cc" =~ ^[0-9]{2}$ ]]; then
-    echo "$cc"
-    return 0
+  cc_list="$(printf '%s\n' "$raw_list" | sed 's/\.//g' | awk '/^[0-9]{2,3}$/')"
+  [ -n "$cc_list" ] || return 1
+  if [ "$CUDA_CC_POLICY" = "max" ]; then
+    printf '%s\n' "$cc_list" | sort -n | tail -n 1
+  else
+    printf '%s\n' "$cc_list" | sort -n | head -n 1
   fi
-  return 1
+}
+
+detect_cuda_cc_list() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return 1
+  fi
+  nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | tr -d '[:space:]' \
+    | sed 's/\.//g' \
+    | awk '/^[0-9]{2,3}$/'
 }
 
 AUTO_CUDA_CC="$(detect_cuda_cc || true)"
+AUTO_CUDA_CC_LIST="$(detect_cuda_cc_list | sort -n | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
 if [ -n "${AUTO_CUDA_CC:-}" ]; then
   CUDA_CC="${CUDA_CC:-$AUTO_CUDA_CC}"   # e.g. 80, 90
 else
@@ -129,7 +179,8 @@ log "CUDA_HOME=${CUDA_HOME:-<unset>}"
 log "CUDA_CC=${CUDA_CC}"
 log "CUDA_RUNTIME=${CUDA_RUNTIME}"
 if [ -n "${AUTO_CUDA_CC:-}" ]; then
-  log "CUDA_CC(auto from nvidia-smi)=${AUTO_CUDA_CC}"
+  log "CUDA_CC(auto from nvidia-smi; policy=${CUDA_CC_POLICY})=${AUTO_CUDA_CC}"
+  log "CUDA_CC(auto candidates)=${AUTO_CUDA_CC_LIST:-<unavailable>}"
 else
   log "CUDA_CC(auto from nvidia-smi)=<unavailable>"
 fi

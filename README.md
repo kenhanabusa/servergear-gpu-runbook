@@ -69,12 +69,15 @@ tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc
 ```
 
 - 無引数で起動可能（既定: `--preset epw_metal_bench_heavy`）。
+- 既定は native-only（NGC未実行）。
 - 既定で `--auto-scale` 有効（`1,2,4,8...` をGPU枚数上限まで、最大8）。
 - `--no-auto-scale` で従来の `np1/np4` 実行に固定可能。
+- NGCを回す場合のみ `--with-ngc --ngc-image <image>` を指定。
+- NGC未指定/利用不可時は `summary.txt` に `NGC: SKIP (image not provided / docker not available)` を記録して正常終了。
 
 ```bash
 # 明示例
-tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc --no-auto-scale --np1 1 --np4 4
+tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc --with-ngc --ngc-image nvcr.io/hpc/quantum_espresso:qe-7.3.1 --no-auto-scale --np1 1 --np4 4
 ```
 
 ### MCA プロファイル
@@ -82,12 +85,14 @@ tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc --no-auto-scale --np1 1 --np4 4
 - `ob1-tcp` / `ucx` / `smcuda` は明示指定時のみ使用します。
 
 ### QE Build（cc自動）
-- `tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u` は既定で `nvidia-smi` から compute capability を自動検出し、`--with-cuda-cc` に反映します。
+- `tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u` は `nvidia-smi` から複数GPUの compute capability を取得し、`--cuda-cc-policy` で選択します。
+- 既定は `--cuda-cc-policy min`（互換優先: 最小ccを採用）。性能優先が必要な場合のみ `--cuda-cc-policy max` を指定します。
 - ビルド後に `pw.x` の `sm_XX` を `LOGDIR/pw_sm_arch.txt` に記録します。
 
 ### 出力構造
 - work: `bench-root/work/bench_qe_vs_ngc_YYYYmmdd_HHMMSS/`
-  - `native_np1/`, `native_np4/`, `ngc_np1_*`, `ngc_np4_*`
+  - `native_np1/`, `native_np4/`（auto-scale時は `native_np2/` なども生成）
+  - NGC有効時のみ `ngc_np1_*`, `ngc_np4_*`
   - 各ケースの `*.out`, `*.err`, `input.in`, `pseudos/`
 - logs: `bench-root/logs/bench_qe_vs_ngc_YYYYmmdd_HHMMSS/`
   - `summary.txt`（JOB DONE / PWSCF WALL / rc）

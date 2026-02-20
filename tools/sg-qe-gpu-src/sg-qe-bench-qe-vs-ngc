@@ -9,6 +9,7 @@ Usage:
                         [--np1 N] [--np4 N]
                         [--auto-scale|--no-auto-scale] [--max-scale N]
                         [--native-qe-prefix DIR]
+                        [--with-ngc]
                         [--ngc-image IMAGE] [--ngc-pw PATH]
                         [--mca-profile ob1-tcp-eth0|ob1-tcp|ucx|smcuda]
 
@@ -19,7 +20,8 @@ Defaults:
   --auto-scale         on (1,2,4,8... up to GPU count, max 8)
   --max-scale          8
   --native-qe-prefix   \$HOME/.local/sg/qe-gpu-src/qe-7.5
-  --ngc-image          nvcr.io/hpc/quantum_espresso:qe-7.3.1
+  --with-ngc           off (default native-only)
+  --ngc-image          (unset; providing it implies --with-ngc)
   --ngc-pw             /usr/local/qe/bin/pw.x
   --mca-profile        ob1-tcp-eth0 (stable default)
 
@@ -41,8 +43,9 @@ NP4=4
 AUTO_SCALE=1
 MAX_SCALE=8
 NATIVE_QE_PREFIX="${HOME}/.local/sg/qe-gpu-src/qe-7.5"
-NGC_IMAGE="nvcr.io/hpc/quantum_espresso:qe-7.3.1"
+NGC_IMAGE=""
 NGC_PW="/usr/local/qe/bin/pw.x"
+WITH_NGC=0
 MCA_PROFILE="ob1-tcp-eth0"
 MCA_PROFILE_SET=0
 RUN_TAG="bench_qe_vs_ngc"
@@ -59,7 +62,8 @@ while [[ $# -gt 0 ]]; do
     --no-auto-scale) AUTO_SCALE=0; shift 1;;
     --max-scale) MAX_SCALE="$2"; shift 2;;
     --native-qe-prefix) NATIVE_QE_PREFIX="$2"; shift 2;;
-    --ngc-image) NGC_IMAGE="$2"; shift 2;;
+    --with-ngc) WITH_NGC=1; shift 1;;
+    --ngc-image) NGC_IMAGE="$2"; WITH_NGC=1; shift 2;;
     --ngc-pw) NGC_PW="$2"; shift 2;;
     --mca-profile) MCA_PROFILE="$2"; MCA_PROFILE_SET=1; shift 2;;
     -h|--help) usage; exit 0;;
@@ -325,6 +329,7 @@ echo "PROFILE : $MCA_PROFILE" | tee -a "$SUMMARY"
 GPU_COUNT="$(detect_gpu_count)"
 echo "GPUS    : $GPU_COUNT" | tee -a "$SUMMARY"
 echo "AUTO_SCALE: $AUTO_SCALE (max=$MAX_SCALE)" | tee -a "$SUMMARY"
+echo "WITH_NGC: $WITH_NGC" | tee -a "$SUMMARY"
 echo "" >> "$SUMMARY"
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -340,16 +345,30 @@ for np in "${SCALE_LIST[@]}"; do
   run_native_case "${LABEL_PREFIX}_native_np${np}_nk${np}" "$np" "$np"
 done
 
-case "$MCA_PROFILE" in
-  ob1-tcp-eth0|ob1-tcp|ucx|smcuda)
-    for np in "${SCALE_LIST[@]}"; do
-      run_ngc_case "${LABEL_PREFIX}_ngc_np${np}_nk${np}_${MCA_PROFILE}" "$np" "$np" "$MCA_PROFILE"
-    done
-    ;;
-  *)
-    die "unknown --mca-profile: $MCA_PROFILE"
-    ;;
-esac
+NGC_SKIP_REASON=""
+if [[ "$WITH_NGC" -eq 0 ]]; then
+  NGC_SKIP_REASON="image not provided"
+elif [[ -z "$NGC_IMAGE" ]]; then
+  NGC_SKIP_REASON="image not provided"
+elif ! command -v docker >/dev/null 2>&1; then
+  NGC_SKIP_REASON="docker not available"
+fi
+
+if [[ -n "$NGC_SKIP_REASON" ]]; then
+  echo "NGC: SKIP (image not provided / docker not available)" | tee -a "$SUMMARY" "$SUMMARY_ALL"
+  echo "NGC_SKIP_REASON: ${NGC_SKIP_REASON}" | tee -a "$SUMMARY" "$SUMMARY_ALL"
+else
+  case "$MCA_PROFILE" in
+    ob1-tcp-eth0|ob1-tcp|ucx|smcuda)
+      for np in "${SCALE_LIST[@]}"; do
+        run_ngc_case "${LABEL_PREFIX}_ngc_np${np}_nk${np}_${MCA_PROFILE}" "$np" "$np" "$MCA_PROFILE"
+      done
+      ;;
+    *)
+      die "unknown --mca-profile: $MCA_PROFILE"
+      ;;
+  esac
+fi
 
 ZIP="${BENCH_ROOT}/${RUN_TAG}_${TS}.zip"
 command -v zip >/dev/null 2>&1 || die "zip not found"

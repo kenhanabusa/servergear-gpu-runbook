@@ -33,6 +33,12 @@ NP="1"
 QE_PREFIX="${SG_QE_PREFIX:-}"
 REQUIRE_GPU=0
 
+if [[ $# -eq 0 ]]; then
+  usage
+  echo "SAFE BLOCK: prerequisites not assumed in no-args mode. Run install first, then retry with options as needed." >&2
+  exit 0
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) QE_PREFIX="${2:-}"; shift 2;;
