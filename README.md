@@ -170,3 +170,5 @@ MIT（または Apache-2.0）
 ## Disclaimer
 本リポジトリは「現状のまま」提供します。環境差により動作しない可能性があります。  
 安全のため、まずは検証環境で試してください。
+
+- PW subset proof: runbooks/QE_TESTSUITE_PW_PROOF.md
