@@ -4,29 +4,33 @@ set -u -o pipefail
 usage() {
   cat <<USAGE
 Usage:
-  sg-qe-bench-qe-vs-ngc --bench-root DIR --input FILE
+  sg-qe-bench-qe-vs-ngc [--preset epw_metal_bench_heavy]
+                        [--bench-root DIR] [--input FILE]
                         [--np1 N] [--np4 N]
                         [--native-qe-prefix DIR]
                         [--ngc-image IMAGE] [--ngc-pw PATH]
-                        [--mca-profile auto|ob1-tcp-eth0|ob1-tcp|ucx|smcuda]
+                        [--mca-profile ob1-tcp-eth0|ob1-tcp|ucx|smcuda]
 
 Defaults:
+  --preset             (none)
   --np1                1
   --np4                4
   --native-qe-prefix   \$HOME/.local/sg/qe-gpu-src/qe-7.5
   --ngc-image          nvcr.io/hpc/quantum_espresso:qe-7.3.1
   --ngc-pw             /usr/local/qe/bin/pw.x
-  --mca-profile        auto (tries ob1-tcp-eth0 -> ob1-tcp)
+  --mca-profile        ob1-tcp-eth0 (stable default)
 
 Notes:
-  - np=4 is always run with "-nk 1" (also applied to np=1 for parity).
-  - mpirun pinning is unified: --bind-to core --map-by slot
+  - fixed comparison: np1 uses -nk 1, np4 uses -nk 4
+  - mpirun pinning is unified: --bind-to core --map-by slot --rank-by slot
+  - rank->GPU is fixed by OMPI local rank (CUDA_VISIBLE_DEVICES=local_rank)
   - nvidia-smi log is sampled every 1s per run.
 USAGE
 }
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 
+PRESET=""
 BENCH_ROOT=""
 INPUT=""
 NP1=1
@@ -34,10 +38,14 @@ NP4=4
 NATIVE_QE_PREFIX="${HOME}/.local/sg/qe-gpu-src/qe-7.5"
 NGC_IMAGE="nvcr.io/hpc/quantum_espresso:qe-7.3.1"
 NGC_PW="/usr/local/qe/bin/pw.x"
-MCA_PROFILE="auto"
+MCA_PROFILE="ob1-tcp-eth0"
+MCA_PROFILE_SET=0
+RUN_TAG="bench_qe_vs_ngc"
+LABEL_PREFIX="bench"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --preset) PRESET="$2"; shift 2;;
     --bench-root) BENCH_ROOT="$2"; shift 2;;
     --input) INPUT="$2"; shift 2;;
     --np1) NP1="$2"; shift 2;;
@@ -45,14 +53,36 @@ while [[ $# -gt 0 ]]; do
     --native-qe-prefix) NATIVE_QE_PREFIX="$2"; shift 2;;
     --ngc-image) NGC_IMAGE="$2"; shift 2;;
     --ngc-pw) NGC_PW="$2"; shift 2;;
-    --mca-profile) MCA_PROFILE="$2"; shift 2;;
+    --mca-profile) MCA_PROFILE="$2"; MCA_PROFILE_SET=1; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
 
+if [[ -n "$PRESET" ]]; then
+  case "$PRESET" in
+    epw_metal_bench_heavy)
+      RUN_TAG="epw_metal_vs_ngc"
+      LABEL_PREFIX="bench2"
+      [[ -n "$BENCH_ROOT" ]] || BENCH_ROOT="/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001"
+      if [[ -z "$INPUT" ]]; then
+        INPUT="${BENCH_ROOT}/work/epw_metal_vs_ngc_20260220_145445/bench/input_bench_heavy.in"
+      fi
+      if [[ ! -f "$INPUT" ]]; then
+        INPUT="$(find "${BENCH_ROOT}/work" -maxdepth 3 -type f -path "*/epw_metal_vs_ngc_*/bench/input_bench_heavy.in" 2>/dev/null | sort | tail -n 1)"
+      fi
+      if [[ "$MCA_PROFILE_SET" -eq 0 ]]; then
+        MCA_PROFILE="ob1-tcp-eth0"
+      fi
+      ;;
+    *)
+      die "unknown --preset: $PRESET"
+      ;;
+  esac
+fi
+
 [[ -n "$BENCH_ROOT" ]] || die "--bench-root is required"
-[[ -n "$INPUT" ]] || die "--input is required"
+[[ -n "$INPUT" ]] || die "--input is required (or use --preset epw_metal_bench_heavy)"
 [[ -f "$INPUT" ]] || die "input not found: $INPUT"
 [[ -d "$BENCH_ROOT" ]] || die "bench-root not found: $BENCH_ROOT"
 
@@ -66,15 +96,27 @@ MPIRUN="$(command -v mpirun || true)"
 [[ -n "$MPIRUN" ]] || die "mpirun not found in PATH"
 
 TS="$(date +%Y%m%d_%H%M%S)"
-WORKROOT="${BENCH_ROOT}/work/bench_qe_vs_ngc_${TS}"
-LOGROOT="${BENCH_ROOT}/logs/bench_qe_vs_ngc_${TS}"
-mkdir -p "$WORKROOT" "$LOGROOT"
+WORKROOT="${BENCH_ROOT}/work/${RUN_TAG}_${TS}"
+LOGROOT="${BENCH_ROOT}/logs/${RUN_TAG}_${TS}"
+mkdir -p "$WORKROOT" "$LOGROOT" || die "failed to create output dirs under bench-root: $BENCH_ROOT"
 
 SUMMARY="${LOGROOT}/summary.txt"
-touch "$SUMMARY"
+SUMMARY_ALL="${LOGROOT}/summary_all.txt"
+SUMMARY_BENCH2="${LOGROOT}/summary_bench2.txt"
+: > "$SUMMARY"
+: > "$SUMMARY_ALL"
+: > "$SUMMARY_BENCH2"
 
-COMMON_PINNING=(--bind-to core --map-by slot)
-COMMON_MPI_ENV=(OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_PROC_BIND=close)
+COMMON_PINNING=(--bind-to core --map-by slot --rank-by slot)
+COMMON_MPI_ENV=(OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 FFTW_NUM_THREADS=1 OMP_PROC_BIND=close OMP_PLACES=cores)
+NVHPC_COMM_LIBS_DEFAULT="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/comm_libs/12.9"
+NVHPC_CUDA_DEFAULT="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9"
+if [[ -z "${NVCOMPILER_COMM_LIBS_HOME:-}" && -d "$NVHPC_COMM_LIBS_DEFAULT" ]]; then
+  export NVCOMPILER_COMM_LIBS_HOME="$NVHPC_COMM_LIBS_DEFAULT"
+fi
+if [[ -z "${NVHPC_CUDA_HOME:-}" && -d "$NVHPC_CUDA_DEFAULT" ]]; then
+  export NVHPC_CUDA_HOME="$NVHPC_CUDA_DEFAULT"
+fi
 
 have_nvidia_smi=0
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -102,7 +144,7 @@ stop_smi_log() {
 
 extract_wall() {
   local out="$1"
-  rg -n "PWSCF" "$out" | tail -n 1 | sed -E 's/^.*PWSCF/    PWSCF/'
+  rg -n "PWSCF[[:space:]]*:.*WALL" "$out" | tail -n 1 | sed -E 's/^.*(PWSCF[[:space:]]*:.*WALL)/     \1/'
 }
 
 job_done() {
@@ -111,25 +153,34 @@ job_done() {
 }
 
 write_summary() {
-  local label="$1" rc="$2" profile="$3" out="$4"
+  local label="$1" rc="$2" profile="$3" out="$4" cmdlog="$5"
   local done="NO"
-  local wall="(no PWSCF line)"
+  local wall=""
   if job_done "$out"; then done="YES"; fi
   local line
   line="$(extract_wall "$out")"
   if [[ -n "$line" ]]; then wall="$line"; fi
-  printf "%-20s rc=%-3s job_done=%-3s profile=%s\n" "$label" "$rc" "$done" "$profile" >> "$SUMMARY"
-  echo "  $wall" >> "$SUMMARY"
+  local row
+  row="${label}|job_done=${done}|${wall}|"
+  echo "$row" >> "$SUMMARY"
+  echo "$row" >> "$SUMMARY_ALL"
+  if [[ "$label" == bench2_* ]]; then
+    echo "$row" >> "$SUMMARY_BENCH2"
+  fi
+  {
+    echo "rc=${rc}"
+    echo "profile=${profile}"
+  } >> "$cmdlog"
 }
 
 mca_env_for_profile() {
   local profile="$1"
   case "$profile" in
     ob1-tcp-eth0)
-      echo "OMPI_MCA_pml=ob1 OMPI_MCA_btl=tcp,self OMPI_MCA_btl_tcp_if_include=eth0 OMPI_MCA_coll=^hcoll"
+      echo "OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,tcp OMPI_MCA_btl_tcp_if_include=eth0 OMPI_MCA_oob_tcp_if_include=eth0 OMPI_MCA_coll=^hcoll"
       ;;
     ob1-tcp)
-      echo "OMPI_MCA_pml=ob1 OMPI_MCA_btl=tcp,self OMPI_MCA_coll=^hcoll"
+      echo "OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,tcp OMPI_MCA_coll=^hcoll"
       ;;
     ucx)
       echo "OMPI_MCA_pml=ucx OMPI_MCA_coll=^hcoll"
@@ -144,7 +195,7 @@ mca_env_for_profile() {
 }
 
 run_native_case() {
-  local label="$1" np="$2"
+  local label="$1" np="$2" nk="$3"
   local casedir="${WORKROOT}/${label}"
   mkdir -p "$casedir"
   cp -a "$INPUT" "${casedir}/input.in"
@@ -157,24 +208,33 @@ run_native_case() {
 
   {
     echo "label=${label}"
-    echo "cmd: mpirun ${COMMON_PINNING[*]} -np ${np} ${NATIVE_PW} -nk 1 -in ${casedir}/input.in"
+    echo "cmd: mpirun ${COMMON_PINNING[*]} -np ${np} bash -lc 'CUDA_VISIBLE_DEVICES=\${OMPI_COMM_WORLD_LOCAL_RANK:-0}; exec \"${NATIVE_PW}\" -nk ${nk} -in \"${casedir}/input.in\"'"
     echo "env: ${COMMON_MPI_ENV[*]}"
+    sha256sum "${casedir}/input.in"
   } > "$cmdlog"
 
   local smi_pid
   smi_pid="$(start_smi_log "$smi")"
 
   local rc=0
-  env "${COMMON_MPI_ENV[@]}" \
-    "$MPIRUN" "${COMMON_PINNING[@]}" -np "$np" "$NATIVE_PW" -nk 1 -in "${casedir}/input.in" \
+  local native_env=("${COMMON_MPI_ENV[@]}")
+  if [[ -n "${NVCOMPILER_COMM_LIBS_HOME:-}" ]]; then
+    native_env+=("NVCOMPILER_COMM_LIBS_HOME=${NVCOMPILER_COMM_LIBS_HOME}")
+  fi
+  if [[ -n "${NVHPC_CUDA_HOME:-}" ]]; then
+    native_env+=("NVHPC_CUDA_HOME=${NVHPC_CUDA_HOME}")
+  fi
+  env "${native_env[@]}" SG_PW="$NATIVE_PW" SG_CASEDIR="$casedir" SG_NK="$nk" \
+    "$MPIRUN" "${COMMON_PINNING[@]}" -np "$np" \
+    bash -lc 'cd "$SG_CASEDIR"; export CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK:-0}; exec "$SG_PW" -nk "$SG_NK" -in input.in' \
     > "$out" 2> "$err" || rc=$?
 
   stop_smi_log "$smi_pid"
-  write_summary "$label" "$rc" "native" "$out"
+  write_summary "$label" "$rc" "native" "$out" "$cmdlog"
 }
 
 run_ngc_case() {
-  local label="$1" np="$2" profile="$3"
+  local label="$1" np="$2" nk="$3" profile="$4"
   local casedir="${WORKROOT}/${label}"
   mkdir -p "$casedir"
   cp -a "$INPUT" "${casedir}/input.in"
@@ -191,8 +251,9 @@ run_ngc_case() {
   {
     echo "label=${label}"
     echo "profile=${profile}"
-    echo "cmd: docker run --rm --gpus all --ipc=host --network=host -v ${casedir}:/work ${NGC_IMAGE} mpirun ${COMMON_PINNING[*]} -np ${np} ${NGC_PW} -nk 1 -in /work/input.in"
+    echo "cmd: docker run --rm --gpus all --ipc=host --network=host -v ${casedir}:/work ${NGC_IMAGE} mpirun ${COMMON_PINNING[*]} -np ${np} bash -lc 'CUDA_VISIBLE_DEVICES=\${OMPI_COMM_WORLD_LOCAL_RANK:-0}; exec ${NGC_PW} -nk ${nk} -in /work/input.in'"
     echo "env: ${COMMON_MPI_ENV[*]} ${mca_env}"
+    sha256sum "${casedir}/input.in"
   } > "$cmdlog"
 
   local smi_pid
@@ -204,63 +265,47 @@ run_ngc_case() {
   for kv in $mca_env; do docker_env+=(-e "$kv"); done
 
   docker run --rm --gpus all --ipc=host --network=host \
+    -w /work \
     -v "${casedir}:/work" \
     "${docker_env[@]}" \
+    -e SG_NK="$nk" \
     "$NGC_IMAGE" \
-    bash -lc "mpirun ${COMMON_PINNING[*]} -np ${np} ${NGC_PW} -nk 1 -in /work/input.in" \
+    bash -lc "mpirun ${COMMON_PINNING[*]} -np ${np} bash -lc 'cd /work; export CUDA_VISIBLE_DEVICES=\${OMPI_COMM_WORLD_LOCAL_RANK:-0}; exec ${NGC_PW} -nk \${SG_NK} -in input.in'" \
     > "$out" 2> "$err" || rc=$?
 
   stop_smi_log "$smi_pid"
-  write_summary "$label" "$rc" "$profile" "$out"
-}
-
-run_ngc_with_profile() {
-  local np="$1" profile="$2" label="$3"
-  run_ngc_case "$label" "$np" "$profile"
-}
-
-run_ngc_auto() {
-  local np="$1" label_base="$2"
-  local profiles=(ob1-tcp-eth0 ob1-tcp)
-  local p
-  for p in "${profiles[@]}"; do
-    local label="${label_base}_${p}"
-    run_ngc_case "$label" "$np" "$p"
-    if job_done "${WORKROOT}/${label}/${label}.out"; then
-      return 0
-    fi
-  done
-  return 1
+  write_summary "$label" "$rc" "$profile" "$out" "$cmdlog"
 }
 
 echo "== sg-qe-bench-qe-vs-ngc =="
 echo "WORKROOT: $WORKROOT" | tee -a "$SUMMARY"
 echo "LOGROOT : $LOGROOT" | tee -a "$SUMMARY"
+echo "INPUT   : $INPUT" | tee -a "$SUMMARY"
+echo "PROFILE : $MCA_PROFILE" | tee -a "$SUMMARY"
 echo "" >> "$SUMMARY"
 
-run_native_case "native_np1" "$NP1"
-run_native_case "native_np4" "$NP4"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$INPUT" > "${LOGROOT}/input_hashes.sha256"
+else
+  die "sha256sum not found"
+fi
+
+run_native_case "${LABEL_PREFIX}_native_np1_nk1" "$NP1" 1
+run_native_case "${LABEL_PREFIX}_native_np4_nk4" "$NP4" 4
 
 case "$MCA_PROFILE" in
-  auto)
-    run_ngc_auto "$NP1" "ngc_np1"
-    run_ngc_auto "$NP4" "ngc_np4"
-    ;;
   ob1-tcp-eth0|ob1-tcp|ucx|smcuda)
-    run_ngc_with_profile "$NP1" "$MCA_PROFILE" "ngc_np1_${MCA_PROFILE}"
-    run_ngc_with_profile "$NP4" "$MCA_PROFILE" "ngc_np4_${MCA_PROFILE}"
+    run_ngc_case "${LABEL_PREFIX}_ngc_np1_nk1_${MCA_PROFILE}" "$NP1" 1 "$MCA_PROFILE"
+    run_ngc_case "${LABEL_PREFIX}_ngc_np4_nk4_${MCA_PROFILE}" "$NP4" 4 "$MCA_PROFILE"
     ;;
   *)
     die "unknown --mca-profile: $MCA_PROFILE"
     ;;
 esac
 
-ZIP="${BENCH_ROOT}/bench_qe_vs_ngc_${TS}.zip"
-if command -v zip >/dev/null 2>&1; then
-  (cd "$BENCH_ROOT" && zip -r "$ZIP" "work/bench_qe_vs_ngc_${TS}" "logs/bench_qe_vs_ngc_${TS}" >/dev/null)
-  echo "ZIP: $ZIP" >> "$SUMMARY"
-else
-  echo "WARN: zip not found; skipping archive" >> "$SUMMARY"
-fi
+ZIP="${BENCH_ROOT}/${RUN_TAG}_${TS}.zip"
+command -v zip >/dev/null 2>&1 || die "zip not found"
+(cd "$BENCH_ROOT" && zip -r "$ZIP" "work/${RUN_TAG}_${TS}" "logs/${RUN_TAG}_${TS}" >/dev/null)
+echo "ZIP: $ZIP" >> "$SUMMARY"
 
 echo "Summary: $SUMMARY"
