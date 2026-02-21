@@ -138,15 +138,24 @@ sg_detect_ompi_root() {
     echo "$SG_QE_OMPI_ROOT"; return 0
   fi
 
+  if [[ -n "${NVCOMPILER_COMM_LIBS_HOME:-}" ]]; then
+    local from_comm
+    from_comm="$(pick_latest "${NVCOMPILER_COMM_LIBS_HOME}"/hpcx/hpcx-*/ompi 2>/dev/null || true)"
+    if [[ -n "$from_comm" && -d "$from_comm" ]]; then
+      echo "$from_comm"; return 0
+    fi
+  fi
+
+  local cand
+  cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/comm_libs/*/hpcx/hpcx-*/ompi 2>/dev/null || true)"
+  [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+
   local mr
   mr="$(command -v mpirun 2>/dev/null || true)"
   if [[ -n "$mr" ]]; then
     (cd "$(dirname "$mr")/.." && pwd); return 0
   fi
 
-  local cand
-  cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/comm_libs/*/hpcx/hpcx-*/ompi 2>/dev/null || true)"
-  [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
   return 1
 }
 
@@ -154,9 +163,81 @@ sg_setup_runtime_env() {
   local nvhpc_compilers ompi_root
   nvhpc_compilers="$(sg_detect_nvhpc_compilers 2>/dev/null || true)"
   ompi_root="$(sg_detect_ompi_root 2>/dev/null || true)"
+  AUTOENV_LOGS=()
+
+  sg_autoenv_note() {
+    AUTOENV_LOGS+=("AUTOENV: $*")
+  }
+
+  sg_detect_comm_libs_home() {
+    local default_comm="/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/comm_libs/12.9"
+    local cand=""
+    if [[ -n "${NVCOMPILER_COMM_LIBS_HOME:-}" && -d "${NVCOMPILER_COMM_LIBS_HOME:-}" ]]; then
+      echo "$NVCOMPILER_COMM_LIBS_HOME"; return 0
+    fi
+    if [[ -d "$default_comm" ]]; then
+      echo "$default_comm"; return 0
+    fi
+    if [[ -n "${SG_QE_OMPI_ROOT:-}" ]]; then
+      cand="$(printf '%s\n' "$SG_QE_OMPI_ROOT" | sed -E 's#(/hpcx/hpcx-[^/]+/ompi)$##')"
+      [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+    fi
+    if [[ -n "$ompi_root" ]]; then
+      cand="$(printf '%s\n' "$ompi_root" | sed -E 's#(/hpcx/hpcx-[^/]+/ompi)$##')"
+      [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+    fi
+    cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/comm_libs/*/hpcx/hpcx-*/ompi 2>/dev/null || true)"
+    if [[ -n "$cand" ]]; then
+      cand="$(printf '%s\n' "$cand" | sed -E 's#(/hpcx/hpcx-[^/]+/ompi)$##')"
+    fi
+    [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+    return 1
+  }
+
+  sg_detect_cuda_home() {
+    local comm_home="$1"
+    local cand=""
+    if [[ -n "${NVHPC_CUDA_HOME:-}" && -d "${NVHPC_CUDA_HOME:-}" ]]; then
+      echo "$NVHPC_CUDA_HOME"; return 0
+    fi
+    if [[ -n "${CUDA_HOME:-}" && -d "${CUDA_HOME:-}" ]]; then
+      echo "$CUDA_HOME"; return 0
+    fi
+    if [[ -n "$comm_home" ]]; then
+      cand="$(printf '%s\n' "$comm_home" | sed -E 's#/comm_libs/([^/]+)$#/cuda/\1#')"
+      [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+    fi
+    cand="$(pick_latest /opt/nvidia/hpc_sdk/Linux_x86_64/*/cuda/* 2>/dev/null || true)"
+    [[ -n "$cand" && -d "$cand" ]] && { echo "$cand"; return 0; }
+    return 1
+  }
+
+  local comm_libs_home cuda_home
+  comm_libs_home="$(sg_detect_comm_libs_home 2>/dev/null || true)"
+  cuda_home="$(sg_detect_cuda_home "$comm_libs_home" 2>/dev/null || true)"
+
+  if [[ -z "${NVCOMPILER_COMM_LIBS_HOME:-}" && -n "$comm_libs_home" ]]; then
+    export NVCOMPILER_COMM_LIBS_HOME="$comm_libs_home"
+    sg_autoenv_note "set NVCOMPILER_COMM_LIBS_HOME=$NVCOMPILER_COMM_LIBS_HOME"
+  fi
+  if [[ -z "${NVHPC_CUDA_HOME:-}" && -n "$cuda_home" ]]; then
+    export NVHPC_CUDA_HOME="$cuda_home"
+    sg_autoenv_note "set NVHPC_CUDA_HOME=$NVHPC_CUDA_HOME"
+  fi
+
+  # Prefer HPC-X OpenMPI under comm_libs when available.
+  if [[ -n "$comm_libs_home" ]]; then
+    local pref_ompi
+    pref_ompi="$(pick_latest "$comm_libs_home"/hpcx/hpcx-*/ompi 2>/dev/null || true)"
+    if [[ -n "$pref_ompi" && -x "$pref_ompi/bin/mpirun" ]]; then
+      ompi_root="$pref_ompi"
+      sg_autoenv_note "prefer mpirun=$ompi_root/bin/mpirun"
+    fi
+  fi
 
   if [[ -n "$ompi_root" && -x "$ompi_root/bin/mpirun" ]]; then
     export PATH="$ompi_root/bin:$PATH"
+    sg_autoenv_note "prepend PATH with $ompi_root/bin"
   fi
 
   local add=""
@@ -175,6 +256,7 @@ sg_setup_runtime_env() {
   add="${add#:}"
   if [[ -n "$add" ]]; then
     export LD_LIBRARY_PATH="$add${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    sg_autoenv_note "prepend LD_LIBRARY_PATH entries"
   fi
 }
 
@@ -329,7 +411,14 @@ main() {
   echo "== QE_PREFIX=$QE_PREFIX" | tee "$LOG"
   echo "== WORKDIR=$WORKDIR" | tee -a "$LOG"
   echo "== PSEUDO(Si)=$SI_UPF" | tee -a "$LOG"
+  if [[ "${#AUTOENV_LOGS[@]}" -gt 0 ]]; then
+    printf '%s\n' "${AUTOENV_LOGS[@]}" | tee -a "$LOG"
+  else
+    echo "AUTOENV: no additional env changes" | tee -a "$LOG"
+  fi
   echo "== mpirun=$(command -v mpirun)" | tee -a "$LOG"
+  echo "== NVCOMPILER_COMM_LIBS_HOME=${NVCOMPILER_COMM_LIBS_HOME:-<unset>}" | tee -a "$LOG"
+  echo "== NVHPC_CUDA_HOME=${NVHPC_CUDA_HOME:-<unset>}" | tee -a "$LOG"
   echo "== LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}" | tee -a "$LOG"
   echo "== GPU_SUMMARY=$GPU_SUMMARY" | tee -a "$LOG"
   : > "$GPU_SUMMARY"

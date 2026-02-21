@@ -27,5 +27,6 @@
 - safe_prefix: /home/dl/.local/sg/smoke-qe-20260221_072958
 - safe_work: /home/dl/.cache/sg/smoke-qe-work-20260221_072958
 - safe_log: /home/dl/.cache/sg/smoke-qe-log-20260221_072958
+- verify note: `sg-qe-verify-scf` は実行時に MPI/CUDA 関連 env の自動補完あり（明示設定は非上書き）
 - smoke_raw: /tmp/qe_entry_smoke_20260221_072958.tsv
 - generated_at: 2026-02-21T07:30:26+09:00

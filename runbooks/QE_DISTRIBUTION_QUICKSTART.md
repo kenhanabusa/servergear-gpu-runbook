@@ -21,6 +21,8 @@ tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u
 tools/sg-qe-gpu-src/sg-qe-verify-scf --mode short
 ```
 
+- `sg-qe-verify-scf` は実行前に MPI/CUDA 関連の env を自動補完（非上書き）します。
+
 ## 3) bench（デフォルト: native-only）
 ```bash
 tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc
@@ -35,6 +37,7 @@ tools/sg-qe-gpu-src/sg-qe-bench-qe-vs-ngc --with-ngc --ngc-image nvcr.io/hpc/qua
 
 ## 無引数UX（入口）
 - `sg-qe-verify-scf`: 無引数は Usage + SAFE BLOCK（依存前提で暴走しない）
+  - 実行時は MPI/CUDA 関連 env の自動補完あり（ユーザー明示設定は維持）
 - `sg-verify-qe-gpu-src-u`: 無引数は Usage + SAFE BLOCK
 - `sg-qe-bench-qe-vs-ngc`: 無引数で開始可能（native-only）
 
