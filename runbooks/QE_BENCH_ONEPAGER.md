@@ -13,13 +13,13 @@
 
 ## 結果（latest: `summary_all.txt` / `summary_bench2.txt`）
 Source:
-- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_all.txt`
-- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260221_064926/summary_bench2.txt`
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_all.txt`
+- `/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_bench2.txt`
 
 | Condition | Native QE 7.5 WALL | NGC 7.3.1 WALL | Native speedup vs NGC |
 |---|---:|---:|---:|
-| np1 / nk1 | 30.92s | 34.83s | 1.13x |
-| np4 / nk4 | 9.82s | 11.51s | 1.17x |
+| np1 / nk1 | 30.84s | 35.07s | 1.14x |
+| np4 / nk4 | 9.92s | 11.53s | 1.16x |
 
 ## 再現コマンド（1行）
 Native:

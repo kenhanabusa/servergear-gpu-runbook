@@ -1,0 +1,52 @@
+{
+  "date": "2026-02-20",
+  "scope": "public_latest",
+  "verify": {
+    "source_date": "2026-02-14",
+    "note": "2026-02-20時点でBENCH-QE-001のverify single/multi更新証跡が無いため、既存BENCH-QE-001最新verify値を継続利用",
+    "single_wall_sec": 0.68,
+    "multi": {
+      "np1_wall_sec": 20.17,
+      "np4_wall_sec": 6.97,
+      "speedup_np1_to_np4": 2.89,
+      "efficiency_percent": 72.3
+    }
+  },
+  "bench": {
+    "source_date": "2026-02-20",
+    "input": "input_bench_heavy.in",
+    "np_nk": "np1/nk1, np4/nk4",
+    "native": {
+      "np1_wall_sec": 30.84,
+      "np4_wall_sec": 9.92
+    },
+    "ngc": {
+      "enabled": true,
+      "image": "nvcr.io/hpc/quantum_espresso:qe-7.3.1",
+      "mca_profile": "ob1-tcp-eth0",
+      "np1_wall_sec": 35.07,
+      "np4_wall_sec": 11.53
+    },
+    "native_speedup_vs_ngc": {
+      "np1": 1.14,
+      "np4": 1.16
+    }
+  },
+  "conditions": {
+    "gpu": "NVIDIA A100 80GB PCIe x4",
+    "driver": "580.105.08",
+    "cuda_runtime": "13.0 (driver), 12.9 (toolkit)",
+    "qe_native_version": "7.5",
+    "qe_ngc_version": "7.3.1",
+    "verify_source_commit": "5c8e495"
+  },
+  "source_paths": [
+    "/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary.txt",
+    "/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/summary_all.txt",
+    "/home/dl/bench/BENCH-QE-TESTCASE-PILOT-001/logs/epw_metal_vs_ngc_20260220_163805/input_hashes.sha256",
+    "/home/dl/bench/BENCH-QE-001/20260214_164232/logs/native_single_wall.log",
+    "/home/dl/bench/BENCH-QE-001/20260214_164232/logs/native_multi_wall.log",
+    "/home/dl/bench/BENCH-QE-001/20260214_164232/logs/native_multi_keep.log",
+    "/home/dl/bench/BENCH-QE-001/20260214_164232/meta/env_summary.txt"
+  ]
+}

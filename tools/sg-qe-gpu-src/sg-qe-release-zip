@@ -50,6 +50,8 @@ INCLUDE_PATHS=(
   "tools/sg-qe-gpu-src-u/sg-verify-qe-gpu-src-u"
   "tools/sg-qe-gpu-src-u/sg-remove-qe-gpu-src-u"
   "runbooks/QE_DISTRIBUTION_QUICKSTART.md"
+  "runbooks/QE_BENCH_PUBLIC_LATEST.json"
+  "runbooks/QE_BENCH_PUBLIC_LATEST.md"
   "runbooks/QE_PROOF_PACK_INDEX.md"
   "runbooks/QE_LP_COPY.md"
   "runbooks/QE_INSTALL_LAYOUT.md"
