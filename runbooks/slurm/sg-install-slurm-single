@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-. /usr/local/lib/sg-runbook/lib/common.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
 require_root
 ensure_log_dir
 
@@ -8,7 +20,7 @@ OUT="$RB_LOG_DIR/install_slurm_single_$(_rb_now).log"
 exec > >(tee -a "$OUT") 2>&1
 
 usage() {
-  cat >&2 <<'USAGE'
+  cat <<'USAGE'
 Usage:
   sg-install-slurm-single [--cluster <name>] [--partition <name>] [--no-reset-state]
 
@@ -23,7 +35,6 @@ This script:
   - forces -f /etc/slurm/slurm.conf via /etc/default/slurmctld and /etc/default/slurmd
   - starts munge, slurmctld, slurmd
 USAGE
-  exit 2
 }
 
 CLUSTER="mycluster"
@@ -35,7 +46,7 @@ while [[ $# -gt 0 ]]; do
     --cluster) CLUSTER="${2:-}"; shift 2 ;;
     --partition) PART="${2:-}"; shift 2 ;;
     --no-reset-state) RESET_STATE="no"; shift ;;
-    -h|--help) usage ;;
+    -h|--help) usage; exit 0 ;;
     *) die "unknown arg: $1" ;;
   esac
 done

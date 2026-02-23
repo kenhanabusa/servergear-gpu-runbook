@@ -52,6 +52,25 @@ sg-verify-gpu
 
 ---
 
+## 配布アセット作成（zip/sha256）
+Top3 runbook の公開配布物は `scripts/sg-release-runbooks` でまとめて生成できます。
+
+```bash
+scripts/sg-release-runbooks
+```
+
+出力先（既定）:
+- `dist/releases/<YYYYMMDD>/`
+- `SHA256SUMS.txt`
+- `ASSET_LIST.txt`
+
+例（対象を明示）:
+```bash
+scripts/sg-release-runbooks --date 20260224 sg-hw-inventory sg-lammps-allegro sg-allegro
+```
+
+---
+
 ## QE Bench (Native vs NGC)
 ネイティブ QE 7.5 と NGC QE 7.3.1 を **同条件** で比較するためのベンチ実行スクリプトです。
 採用ベンチは `epw_metal` + `input_bench_heavy.in` です。

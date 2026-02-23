@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
+
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="/var/log/sg-runbook"
 LOG="${LOG_DIR}/remove_slurm_single_${TS}.log"
@@ -71,8 +85,10 @@ apt-get autoremove -y --purge || true
 
 if [[ $PURGE_DATA -eq 1 ]]; then
   log "remove state dirs"
-  rm -rf /var/spool/slurm* /var/lib/slurm* /var/log/slurm* 2>/dev/null || true
-  rm -rf /var/lib/munge /var/log/munge 2>/dev/null || true
+  for d in /var/spool/slurm /var/spool/slurmctld /var/lib/slurm /var/lib/slurmctld /var/log/slurm /var/lib/munge /var/log/munge; do
+    [[ -e "$d" ]] || continue
+    sg_safe_rm_dir "$d" /var/spool /var/lib /var/log || true
+  done
 fi
 
 if [[ $REMOVE_USERS -eq 1 ]]; then

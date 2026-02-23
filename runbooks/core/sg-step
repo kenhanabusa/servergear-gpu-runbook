@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
-. /usr/local/lib/sg-runbook/lib/common.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
 require_root
 
 usage() {
-  cat >&2 <<'USAGE'
+  cat <<'USAGE'
 Usage:
   sg-step <STEP_NAME> -- <command...>
 
@@ -21,16 +33,29 @@ Example:
   sg-step initramfs_fix -- sg-fix-initramfs-compress
   sg-step slurm_install_mycluster -- sg-install-slurm-single --cluster mycluster
 USAGE
-  exit 2
 }
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 step="${1:-}"
-[[ -n "$step" ]] || usage
+if [[ -z "$step" ]]; then
+  usage >&2
+  exit 2
+fi
 shift || true
 
-[[ "${1:-}" == "--" ]] || usage
+if [[ "${1:-}" != "--" ]]; then
+  usage >&2
+  exit 2
+fi
 shift || true
-[[ $# -gt 0 ]] || usage
+if [[ $# -le 0 ]]; then
+  usage >&2
+  exit 2
+fi
 
 if ! have_cmd sg-ts; then
   die "sg-ts not found"

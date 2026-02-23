@@ -4,6 +4,24 @@ set -euo pipefail
 # Server Gear / Shipping support information collector
 # - Collects non-sensitive system info into a tar.gz for support / documentation.
 
+usage() {
+  cat <<'USAGE'
+Usage:
+  sg-collect-info [--help]
+
+Description:
+  Collect non-sensitive host diagnostics into a tar.gz bundle.
+
+Output:
+  OUT_BASE/collect_<host>_<timestamp>/ and OUT_BASE/<host>_collect_<timestamp>.tar.gz
+USAGE
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 OUT_BASE="${OUT_BASE:-/opt/sg-demo/support}"
 TS="$(date +%F_%H%M%S)"
 HOST="$(hostname -s 2>/dev/null || hostname)"

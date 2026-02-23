@@ -9,6 +9,14 @@ LOG="${LOG_DIR}/remove_lammps_allegro_STK-011_${TS}.log"
 
 log(){ local line="[$(date -Is)] $*"; echo "$line" >&2; mkdir -p "$LOG_DIR" 2>/dev/null||true; printf "%s\n" "$line" >> "$LOG" 2>/dev/null||true; }
 die(){ log "ERROR: $*"; exit 1; }
+safe_rm_dir() {
+  local p="$1"
+  case "$p" in
+    ""|"/"|"/opt"|"/opt/sg") die "refused dangerous path: $p" ;;
+    /opt/sg/*) rm -rf -- "$p" ;;
+    *) die "refused path outside /opt/sg: $p" ;;
+  esac
+}
 
 usage(){
   cat <<'EOF'
@@ -35,7 +43,7 @@ done
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
 log "BEGIN remove-lammps-allegro purge_apt=${PURGE}"
 
-rm -rf /opt/sg/lammps-allegro 2>/dev/null || true
+safe_rm_dir /opt/sg/lammps-allegro 2>/dev/null || true
 if (( PURGE )); then
   apt-get remove -y --purge lammps || true
   apt-get autoremove -y --purge || true

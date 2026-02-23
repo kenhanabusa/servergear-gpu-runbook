@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
+
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="/var/log/sg-runbook"
 LOG="${LOG_DIR}/remove_nvhpc_${TS}.log"
@@ -82,12 +96,12 @@ log "apt autoremove..."
 apt-get autoremove -y --purge || true
 
 log "remove profile script (if present)"
-rm -f /etc/profile.d/nvhpc.sh || true
+sg_safe_rm_file /etc/profile.d/nvhpc.sh /etc/profile.d || true
 
 if [[ $KEEP_REPO -eq 0 ]]; then
   log "remove repo files"
-  rm -f /etc/apt/sources.list.d/nvhpc.list || true
-  rm -f /usr/share/keyrings/nvhpc.gpg || true
+  sg_safe_rm_file /etc/apt/sources.list.d/nvhpc.list /etc/apt/sources.list.d || true
+  sg_safe_rm_file /usr/share/keyrings/nvhpc.gpg /usr/share/keyrings || true
 fi
 
 if [[ $PURGE_DATA -eq 1 ]]; then
@@ -97,7 +111,7 @@ if [[ $PURGE_DATA -eq 1 ]]; then
     log "backup $ROOT -> $BK_DIR"
     cp -a "$ROOT" "$BK_DIR/" || true
     log "remove $ROOT"
-    rm -rf "$ROOT"
+    sg_safe_rm_dir "$ROOT" /opt/nvidia/hpc_sdk
     rmdir -p --ignore-fail-on-non-empty "/opt/nvidia/hpc_sdk/Linux_x86_64" 2>/dev/null || true
   else
     warn "$ROOT not found (skip)"

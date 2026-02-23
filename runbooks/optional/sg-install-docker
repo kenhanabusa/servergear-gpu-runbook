@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-. /usr/local/lib/sg-runbook/lib/common.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
 require_root
 ensure_log_dir
 
@@ -8,7 +20,7 @@ OUT="$RB_LOG_DIR/install_docker_gpu_$(_rb_now).log"
 exec > >(tee -a "$OUT") 2>&1
 
 usage() {
-  cat >&2 <<'USAGE'
+  cat <<'USAGE'
 Usage:
   sg-install-docker [--add-user USER]...
 
@@ -18,14 +30,13 @@ Behavior:
   - Installs NVIDIA Container Toolkit (apt repo) and configures Docker runtime via nvidia-ctk.
   - By default, DOES NOT add any user to the docker group (security).
 USAGE
-  exit 2
 }
 
 ADD_USERS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --add-user) ADD_USERS+=("${2:-}"); shift 2 ;;
-    -h|--help) usage ;;
+    -h|--help) usage; exit 0 ;;
     *) die "unknown arg: $1" ;;
   esac
 done

@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/sg-release-runbooks [--date YYYYMMDD] [--outdir DIR] [runbook...]
+
+Behavior:
+  - Create zip assets for selected tools/sg-* runbooks.
+  - Write SHA256SUMS.txt and ASSET_LIST.txt in the release directory.
+
+Defaults:
+  runbook... : sg-hw-inventory sg-lammps-allegro sg-allegro
+  --date     : today (YYYYMMDD)
+  --outdir   : dist/releases/<date>
+
+Examples:
+  scripts/sg-release-runbooks
+  scripts/sg-release-runbooks --date 20260224 sg-hw-inventory sg-allegro
+USAGE
+}
+
+DATE_TAG="$(date +%Y%m%d)"
+OUTDIR=""
+declare -a TARGETS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --date)
+      DATE_TAG="${2:-}"
+      shift 2
+      ;;
+    --outdir)
+      OUTDIR="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      TARGETS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+  TARGETS=(sg-hw-inventory sg-lammps-allegro sg-allegro)
+fi
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "$REPO_ROOT"
+
+if [[ -z "$OUTDIR" ]]; then
+  OUTDIR="dist/releases/${DATE_TAG}"
+fi
+mkdir -p "$OUTDIR"
+
+for rb in "${TARGETS[@]}"; do
+  src="tools/${rb}"
+  [[ -d "$src" ]] || { echo "[ERROR] runbook not found: $src" >&2; exit 1; }
+done
+
+declare -a ZIPS=()
+for rb in "${TARGETS[@]}"; do
+  src="tools/${rb}"
+  zip_name="${rb}_${DATE_TAG}.zip"
+  zip_path="${OUTDIR}/${zip_name}"
+  rm -f "$zip_path"
+  zip -rq "$zip_path" "$src"
+  ZIPS+=("$zip_path")
+  echo "[INFO] packed: $zip_path"
+done
+
+sha_file="${OUTDIR}/SHA256SUMS.txt"
+asset_file="${OUTDIR}/ASSET_LIST.txt"
+: > "$sha_file"
+: > "$asset_file"
+
+for z in "${ZIPS[@]}"; do
+  sha256sum "$z" >> "$sha_file"
+  size="$(stat -c '%s' "$z")"
+  mtime="$(stat -c '%y' "$z")"
+  printf '%s\t%s\t%s\n' "$(basename "$z")" "$size" "$mtime" >> "$asset_file"
+done
+
+echo "[INFO] wrote: $sha_file"
+echo "[INFO] wrote: $asset_file"

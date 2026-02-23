@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMMON=/usr/local/lib/sg-runbook/lib/common.sh
-if [[ -r "$COMMON" ]]; then
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
   # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
-  source "$COMMON"
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
 fi
 
 log(){ echo "[INFO] $*"; }
@@ -52,6 +60,6 @@ if [[ ! -e "$BASE_DIR" ]]; then
   exit 0
 fi
 
-rm -rf "$BASE_DIR"
+sg_safe_rm_dir "$BASE_DIR" /opt/sg/containers "$BASE_DIR"
 log "Removed: $BASE_DIR"
 log "==== sg-remove-pytorch-apptainer done ===="

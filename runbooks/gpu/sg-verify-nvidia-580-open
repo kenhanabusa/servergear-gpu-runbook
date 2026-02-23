@@ -11,6 +11,24 @@ die(){ echo "[ERROR] $*" >&2; exit 1; }
 log(){ echo "[INFO] $*"; }
 warn(){ echo "[WARN] $*"; }
 
+usage(){
+  cat <<'USAGE'
+Usage: sg-verify-nvidia-580-open [--help]
+
+Checks:
+  - nvidia-smi availability
+  - driver version is 580.x
+  - related dkms/package status
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
 [[ $EUID -eq 0 ]] || die "run as root"
 
 log "==== sg-verify-nvidia-580-open start ===="

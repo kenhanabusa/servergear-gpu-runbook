@@ -29,6 +29,24 @@ die(){ log "ERROR: $*"; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
 
+safe_rm_dir() {
+  local p="$1"
+  case "$p" in
+    ""|"/"|"/opt"|"/opt/sg") die "refused dangerous path: $p" ;;
+    /opt/sg/*) rm -rf -- "$p" ;;
+    *) die "refused path outside /opt/sg: $p" ;;
+  esac
+}
+
+safe_rm_file() {
+  local p="$1"
+  case "$p" in
+    ""|"/"|"/opt"|"/opt/containers") die "refused dangerous file path: $p" ;;
+    /opt/containers/*) rm -f -- "$p" ;;
+    *) die "refused file path outside /opt/containers: $p" ;;
+  esac
+}
+
 log "BEGIN ${STEP} app_root=$APP_ROOT purge_sif=$PURGE_SIF"
 SIF_DEFAULT="/opt/containers/sg-lammps-allegro.sif"
 SIF_PATH="$SIF_DEFAULT"
@@ -37,9 +55,9 @@ if [[ -f "$APP_ROOT/meta/sif_path.txt" ]]; then
   [[ -n "$s" ]] && SIF_PATH="$s"
 fi
 
-rm -rf "$APP_ROOT" || true
+safe_rm_dir "$APP_ROOT" || true
 if (( PURGE_SIF == 1 )); then
-  rm -f "$SIF_PATH" || true
+  safe_rm_file "$SIF_PATH" || true
   log "PURGED SIF: $SIF_PATH"
 else
   log "KEPT SIF: $SIF_PATH"

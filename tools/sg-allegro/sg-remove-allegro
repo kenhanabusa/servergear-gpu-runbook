@@ -18,6 +18,15 @@ done
 log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
 [[ $EUID -eq 0 ]] || { log "ERROR: run as root"; exit 1; }
 
+safe_rm_dir() {
+  local p="$1"
+  case "$p" in
+    ""|"/"|"/opt"|"/opt/sg") log "ERROR: refused dangerous path: $p"; return 1 ;;
+    /opt/sg/*) rm -rf -- "$p" ;;
+    *) log "ERROR: refused path outside /opt/sg: $p"; return 1 ;;
+  esac
+}
+
 log "BEGIN remove $APP_ROOT"
-rm -rf "$APP_ROOT" || true
+safe_rm_dir "$APP_ROOT" || true
 log "OK"

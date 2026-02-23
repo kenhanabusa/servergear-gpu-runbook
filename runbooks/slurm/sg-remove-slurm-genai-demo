@@ -2,7 +2,19 @@
 timestamp(){ date +%Y%m%d_%H%M%S; }
     set -euo pipefail
 
-    . /usr/local/lib/sg-runbook/lib/common.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RB_COMMON_SYSTEM="/usr/local/lib/sg-runbook/lib/common.sh"
+RB_COMMON_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)/lib/common.sh"
+if [[ -r "$RB_COMMON_SYSTEM" ]]; then
+  # shellcheck source=/usr/local/lib/sg-runbook/lib/common.sh
+  . "$RB_COMMON_SYSTEM"
+elif [[ -r "$RB_COMMON_REPO" ]]; then
+  # shellcheck source=runbooks/lib/common.sh
+  . "$RB_COMMON_REPO"
+else
+  echo "[ERROR] common.sh not found: $RB_COMMON_SYSTEM or $RB_COMMON_REPO" >&2
+  exit 1
+fi
 
     require_root
 
@@ -37,7 +49,7 @@ USAGE
 
     target="${demo_dir}/slurm"
     if [[ -d "$target" ]]; then
-      rm -rf "$target"
+      sg_safe_rm_dir "$target" "${demo_dir}/slurm" /opt/sg-demos
       log "Removed: $target"
     else
       log "Not found (ok): $target"
