@@ -46,7 +46,7 @@ echo "hint=${HINT:-}"
 echo "next_cmds:"
 case "${ERR:-}" in
   E_SIF_MISSING|E_APPTAINER_NOT_FOUND|E_LMP_NOT_INSTALLED)
-    echo "  - sudo tools/sg-lammps-allegro/sg-install-lammps-allegro --yes (set SG_LMPA_SIF_URL if needed)"
+    echo "  - SG_PREFIX=\${HOME}/.local/sg tools/sg-lammps-allegro/sg-install-lammps-allegro --yes (set SG_LMPA_SIF_URL if needed)"
     echo "  - tools/sg-lammps-allegro/sg-verify-lammps-allegro"
     ;;
   E_LMP_SAMPLE_MISSING)

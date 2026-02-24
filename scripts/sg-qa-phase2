@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATE="${DATE:-$(date +%Y%m%d)}"
+ROOT="${ROOT:-dist/qa/${DATE}_PHASE2}"
+LOCK="/opt/sg/qa/locks/qa.lock"
+
+QA_HOME_BASE="/opt/sg/qa/home"
+QA_CACHE_BASE="/opt/sg/qa/cache"
+QA_TMP_BASE="/opt/sg/qa/tmp"
+
+RUNBOOK_DIRS_DEFAULT=(
+  "tools/sg-allegro"
+  "tools/sg-lammps-allegro"
+)
+
+if [[ "${RUNBOOK_DIRS:-}" != "" ]]; then
+  # shellcheck disable=SC2206
+  RUNBOOK_DIRS=(${RUNBOOK_DIRS})
+else
+  RUNBOOK_DIRS=("${RUNBOOK_DIRS_DEFAULT[@]}")
+fi
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; }; }
+need unzip
+need timeout
+need sha256sum
+need find
+need awk
+need sed
+need sort
+need diff
+need flock
+need zip
+
+if command -v rg >/dev/null 2>&1; then
+  GREP='rg -n'
+else
+  GREP='grep -RIn'
+fi
+
+mkdir -p "${ROOT}"/{logs,artifacts/zips,work}
+REPORT="${ROOT}/QA_REPORT_${DATE}_PHASE2.md"
+MATRIX="${ROOT}/QA_MATRIX_${DATE}_PHASE2.csv"
+
+echo "runbook,src_dir,zip,sha256,install,verify,remove,doctor,snap_ok,notes,seconds" > "${MATRIX}"
+
+# lock
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+  echo "QA lock is held: ${LOCK}" >&2
+  exit 2
+fi
+
+{
+  echo "# Runbook QA Report Phase2 (${DATE})"
+  echo
+  echo "- repo: $(pwd)"
+  echo "- commit: $(git log -1 --oneline | cat)"
+  echo "- host: $(hostname)"
+  echo "- user: $(id -un)"
+  echo "- root: \`${ROOT}\`"
+  echo
+} > "${REPORT}"
+
+snapshot_tree() {
+  local path="$1"
+  local out="$2"
+  if [[ -d "${path}" ]]; then
+    find "${path}" -xdev -printf '%y\t%p\t%s\t%TY-%Tm-%TdT%TH:%TM:%TS\n' | sort > "${out}"
+  else
+    echo "(missing) ${path}" > "${out}"
+  fi
+}
+
+extract_opt_sg_roots() {
+  local root="$1"
+  local tmp="$2"
+  : > "${tmp}"
+  ${GREP} '/opt/sg/' "${root}" 2>/dev/null \
+    | sed -E 's@.*(/opt/sg/[^/ "'\''\\]+).*@\1@' \
+    | sed -E 's@(/opt/sg/[^/ "'\''\\]+).*@\1@' \
+    | sort -u >> "${tmp}" || true
+  if [[ ! -s "${tmp}" ]]; then
+    echo "/opt/sg" >> "${tmp}"
+  fi
+}
+
+make_zip_from_dir() {
+  local src="$1"
+  local z="$2"
+  # z を絶対パス化（cdで相対が壊れないように）
+  case "$z" in
+    /*) ;;
+    *) z="$(pwd)/$z" ;;
+  esac
+  mkdir -p "$(dirname "$z")"
+  ( cd "$(dirname "$src")" && zip -qr "$z" "$(basename "$src")" )
+}
+
+
+run_one() {
+  local src_dir="$1"
+  local label
+  label="$(basename "${src_dir}")"
+  local ts
+  ts="$(date +%Y%m%d_%H%M%S)"
+
+  local work="${ROOT}/work/${label}/${ts}"
+  local logd="${ROOT}/logs/${label}/${ts}"
+  local zip="${ROOT}/artifacts/zips/${label}_${DATE}.zip"
+  mkdir -p "${work}" "${logd}"
+
+  make_zip_from_dir "${src_dir}" "${zip}"
+  local sha
+  sha="$(sha256sum "${zip}" | awk '{print $1}')"
+
+  unzip -q "${zip}" -d "${work}"
+
+  local install verify remove doctor fetch
+  install="$(find "${work}" -type f -name 'sg-install-*' ! -name '*.bak*' -perm -111 | head -n 1 || true)"
+  verify="$(find "${work}" -type f -name 'sg-verify-*'  ! -name '*.bak*' -perm -111 | head -n 1 || true)"
+  remove="$(find "${work}" -type f -name 'sg-remove-*'  ! -name '*.bak*' -perm -111 | head -n 1 || true)"
+  doctor="$(find "${work}" -type f \( -name 'sg-doctor-*' -o -name '*doctor*' \) ! -name '*.bak*' -perm -111 | head -n 1 || true)"
+  fetch="$(find "${work}" -type f -name 'sg-fetch-*' ! -name '*.bak*' -perm -111 | head -n 1 || true)"
+
+  local QA_HOME="${QA_HOME_BASE}/${label}/${ts}"
+  local XDG_CACHE_HOME="${QA_CACHE_BASE}/${label}/${ts}"
+  local TMPDIR="${QA_TMP_BASE}/${label}/${ts}"
+  mkdir -p "${QA_HOME}" "${XDG_CACHE_HOME}" "${TMPDIR}"
+
+  local roots_file="${logd}/opt_sg_roots.txt"
+  extract_opt_sg_roots "${work}" "${roots_file}"
+
+  local snap_before="${logd}/snapshot_before.txt"
+  local snap_after="${logd}/snapshot_after.txt"
+  local snap_diff="${logd}/snapshot_diff.txt"
+
+  : > "${snap_before}"
+  while IFS= read -r p; do
+    echo "== ${p} ==" >> "${snap_before}"
+    snapshot_tree "${p}" "${logd}/_before_$(echo "${p}" | tr '/ ' '__').txt"
+    cat "${logd}/_before_$(echo "${p}" | tr '/ ' '__').txt" >> "${snap_before}"
+    echo >> "${snap_before}"
+  done < "${roots_file}"
+
+  local t0 t1
+  t0="$(date +%s)"
+
+  local i_stat="FAIL" v_stat="FAIL" r_stat="SKIP" d_stat="N/A" snap_ok="UNKNOWN" notes=""
+
+  {
+    echo "== META =="
+    echo "src_dir: ${src_dir}"
+    echo "zip: ${zip}"
+    echo "sha256: ${sha}"
+    echo "work: ${work}"
+    echo "install: ${install:-none}"
+    echo "verify: ${verify:-none}"
+    echo "remove: ${remove:-none}"
+    echo "doctor: ${doctor:-none}"
+    echo "fetch: ${fetch:-none}"
+    echo "QA_HOME: ${QA_HOME}"
+    echo "XDG_CACHE_HOME: ${XDG_CACHE_HOME}"
+    echo "TMPDIR: ${TMPDIR}"
+    echo
+    echo "== opt/sg roots =="
+    cat "${roots_file}" || true
+  } > "${logd}/meta.txt"
+
+  if [[ -z "${install}" || -z "${verify}" || -z "${remove}" ]]; then
+    notes="missing install/verify/remove in package"
+  else
+    export DEBIAN_FRONTEND=noninteractive
+    export CI=1
+    export SG_NONINTERACTIVE=1
+    export TERM=dumb
+
+    if timeout 5400s env HOME="${QA_HOME}" XDG_CACHE_HOME="${XDG_CACHE_HOME}" TMPDIR="${TMPDIR}" \
+      bash -lc "\"${install}\"" > "${logd}/install.log" 2> "${logd}/stderr.txt"; then
+      i_stat="PASS"
+    else
+      i_stat="FAIL"
+    fi
+
+    if [[ "${i_stat}" == "PASS" && -n "${fetch}" ]]; then
+      timeout 3600s env HOME="${QA_HOME}" XDG_CACHE_HOME="${XDG_CACHE_HOME}" TMPDIR="${TMPDIR}" \
+        bash -lc "\"${fetch}\"" > "${logd}/fetch.log" 2>> "${logd}/stderr.txt" || notes="${notes} fetch_failed;"
+    fi
+
+    if [[ "${i_stat}" == "PASS" ]]; then
+      if timeout 5400s env HOME="${QA_HOME}" XDG_CACHE_HOME="${XDG_CACHE_HOME}" TMPDIR="${TMPDIR}" \
+        bash -lc "\"${verify}\"" > "${logd}/verify.log" 2>> "${logd}/stderr.txt"; then
+        v_stat="PASS"
+      else
+        v_stat="FAIL"
+      fi
+    fi
+
+    if [[ -n "${doctor}" ]]; then
+      if timeout 1200s env HOME="${QA_HOME}" XDG_CACHE_HOME="${XDG_CACHE_HOME}" TMPDIR="${TMPDIR}" \
+        bash -lc "\"${doctor}\"" > "${logd}/doctor.log" 2>> "${logd}/stderr.txt"; then
+        d_stat="PASS"
+      else
+        d_stat="FAIL"
+      fi
+    else
+      d_stat="N/A"
+    fi
+
+    if [[ "${i_stat}" == "PASS" ]]; then
+      if timeout 3600s env HOME="${QA_HOME}" XDG_CACHE_HOME="${XDG_CACHE_HOME}" TMPDIR="${TMPDIR}" \
+        bash -lc "\"${remove}\"" > "${logd}/remove.log" 2>> "${logd}/stderr.txt"; then
+        r_stat="PASS"
+      else
+        r_stat="FAIL"
+      fi
+    else
+      r_stat="SKIP"
+    fi
+  fi
+
+  : > "${snap_after}"
+  while IFS= read -r p; do
+    echo "== ${p} ==" >> "${snap_after}"
+    snapshot_tree "${p}" "${logd}/_after_$(echo "${p}" | tr '/ ' '__').txt"
+    cat "${logd}/_after_$(echo "${p}" | tr '/ ' '__').txt" >> "${snap_after}"
+    echo >> "${snap_after}"
+  done < "${roots_file}"
+
+  if diff -u "${snap_before}" "${snap_after}" > "${snap_diff}" 2>/dev/null; then
+    snap_ok="PASS"
+  else
+    snap_ok="DIFF"
+    if [[ "${r_stat}" == "PASS" ]]; then
+      notes="${notes} opt_sg_leftover_detected;"
+    fi
+  fi
+
+  t1="$(date +%s)"
+  local secs=$((t1 - t0))
+
+  echo "${label},${src_dir},$(basename "${zip}"),${sha},${i_stat},${v_stat},${r_stat},${d_stat},${snap_ok},\"${notes}\",${secs}" >> "${MATRIX}"
+
+  {
+    echo "## ${label}"
+    echo "- src: \`${src_dir}\`"
+    echo "- zip: \`$(basename "${zip}")\`"
+    echo "- sha256: \`${sha}\`"
+    echo "- result: install=${i_stat} / verify=${v_stat} / remove=${r_stat} / doctor=${d_stat} / opt_sg_snapshot=${snap_ok}"
+    echo "- seconds: ${secs}"
+    echo "- logs: \`${logd}\`"
+    echo "- notes: ${notes}"
+    echo
+    if [[ -s "${snap_diff}" && "${snap_ok}" != "PASS" ]]; then
+      echo "<details><summary>/opt/sg diff (head)</summary>"
+      echo
+      echo '```diff'
+      sed -n '1,120p' "${snap_diff}" || true
+      echo '```'
+      echo
+      echo "</details>"
+      echo
+    fi
+    if [[ -s "${logd}/stderr.txt" ]]; then
+      echo "<details><summary>stderr (tail)</summary>"
+      echo
+      echo '```'
+      tail -n 80 "${logd}/stderr.txt" || true
+      echo '```'
+      echo
+      echo "</details>"
+      echo
+    fi
+  } >> "${REPORT}"
+}
+
+echo "Running Phase2 QA -> ${ROOT}"
+for d in "${RUNBOOK_DIRS[@]}"; do
+  if [[ ! -d "${d}" ]]; then
+    echo "missing dir: ${d}" >&2
+    continue
+  fi
+  run_one "${d}"
+done
+
+echo "== DONE =="
+echo "REPORT: ${REPORT}"
+echo "MATRIX: ${MATRIX}"

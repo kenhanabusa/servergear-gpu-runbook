@@ -6,16 +6,32 @@ STK_ID="STK-016"
 STEP="LMPA_INSTALL"
 
 SIF_DEFAULT="/opt/containers/sg-lammps-allegro.sif"
-APP_ROOT="/opt/sg/lammps-allegro"
+PREFIX_ROOT="${SG_PREFIX:-}"
+if [[ -z "${PREFIX_ROOT}" || ( ${EUID:-$(id -u)} -ne 0 && "${PREFIX_ROOT}" == /opt/sg* ) ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    PREFIX_ROOT="/opt/sg"
+  else
+    PREFIX_ROOT="${HOME}/.local/sg"
+  fi
+fi
+if [[ "${PREFIX_ROOT}" == "/opt/sg"* ]] && [[ "${PREFIX_ROOT}" != "${HOME}"* ]] && [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "ERROR: run as root for /opt/sg install, or set SG_PREFIX for user-mode" >&2
+  exit 1
+fi
+APP_ROOT="${PREFIX_ROOT}/lammps-allegro"
 META_DIR="${APP_ROOT}/meta"
 
-MODE="${SG_LMPA_MODE:-bundle}"                 # bundle|url|local
+MODE="${SG_LMPA_MODE:-}"                       # auto|bundle|url|local
 BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
 SIF_PATH="${SG_LMPA_SIF_PATH:-$SIF_DEFAULT}"   # install先
 SIF_URL="${SG_LMPA_SIF_URL:-}"                 # urlモード用
 SIF_LOCAL="${SG_LMPA_SIF_LOCAL:-}"             # localモード用（既存SIFパス）
 
 LOG_DIR="/var/log/sg-runbook"
+if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+  LOG_DIR="${HOME}/sg-runbook-log"
+  mkdir -p "$LOG_DIR"
+fi
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG="${LOG_DIR}/install_lammps_allegro_${STK_ID}_${TS}.log"
 
@@ -32,9 +48,9 @@ while [[ $# -gt 0 ]]; do
       cat <<EOF
 Usage: sudo sg-install-lammps-allegro --yes [--mode bundle|url|local]
 Defaults:
-  --mode bundle
+  --mode auto (user-mode) / bundle (root-mode)
   bundle root: /opt/sg/bundles/lammps-allegro
-  install SIF path: /opt/containers/sg-lammps-allegro.sif
+  install SIF path: /opt/containers/sg-lammps-allegro.sif (root) or \$SG_PREFIX/lammps-allegro/sg-lammps-allegro.sif (user)
 Env:
   SG_LMPA_MODE=bundle|url|local
   SG_LMPA_BUNDLE_ROOT=...
@@ -49,25 +65,66 @@ done
 log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
 die(){ log "ERROR: $*"; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "run as root (sudo)"
+if [[ -z "$MODE" ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then MODE="bundle"; else MODE="auto"; fi
+fi
+
+if [[ "${SIF_PATH}" == "${SIF_DEFAULT}" ]] && [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  SIF_PATH="${APP_ROOT}/sg-lammps-allegro.sif"
+fi
 
 command -v apptainer >/dev/null 2>&1 || {
-  log "INFO: apptainer not found; installing via apt..."
-  apt-get update -y >>"$LOG" 2>&1
-  apt-get install -y apptainer >>"$LOG" 2>&1 || die "failed to install apptainer"
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    log "INFO: apptainer not found; installing via apt..."
+    apt-get update -y >>"$LOG" 2>&1
+    apt-get install -y apptainer >>"$LOG" 2>&1 || die "failed to install apptainer"
+  else
+    die "apptainer not found. install apptainer system-wide, or run as root"
+  fi
 }
-command -v curl >/dev/null 2>&1 || { apt-get update -y >>"$LOG" 2>&1; apt-get install -y curl >>"$LOG" 2>&1; }
+if ! command -v curl >/dev/null 2>&1; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    apt-get update -y >>"$LOG" 2>&1
+    apt-get install -y curl >>"$LOG" 2>&1
+  else
+    die "curl not found"
+  fi
+fi
 
 mkdir -p "$(dirname "$SIF_PATH")" "$META_DIR" || true
 log "BEGIN ${STEP}"
+log "PREFIX_ROOT=$PREFIX_ROOT"
 log "MODE=$MODE"
 log "SIF_PATH=$SIF_PATH"
 
 case "$MODE" in
+  auto)
+    if [[ -n "$SIF_LOCAL" && -f "$SIF_LOCAL" ]]; then
+      if [[ "$SIF_LOCAL" != "$SIF_PATH" ]]; then
+        ln -sf "$SIF_LOCAL" "$SIF_PATH"
+      fi
+    elif [[ -f "$SIF_DEFAULT" ]]; then
+      ln -sf "$SIF_DEFAULT" "$SIF_PATH"
+    elif [[ -f "${BUNDLE_ROOT}/sg-lammps-allegro.sif" ]]; then
+      if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        install -m 0644 "${BUNDLE_ROOT}/sg-lammps-allegro.sif" "$SIF_PATH"
+      else
+        cp -a "${BUNDLE_ROOT}/sg-lammps-allegro.sif" "$SIF_PATH"
+      fi
+    elif [[ -n "$SIF_URL" ]]; then
+      curl -fL --retry 3 --retry-delay 2 "$SIF_URL" -o "$SIF_PATH" >>"$LOG" 2>&1 || die "failed to download SIF"
+    else
+      die "auto mode could not resolve SIF (set SG_LMPA_SIF_LOCAL or SG_LMPA_SIF_URL)"
+    fi
+    ;;
   bundle)
     BUNDLE_SIF="${BUNDLE_ROOT}/sg-lammps-allegro.sif"
     [[ -f "$BUNDLE_SIF" ]] || die "bundle SIF missing: $BUNDLE_SIF (run sg-make-bundle-lammps-allegro or place SIF)"
-    install -m 0644 "$BUNDLE_SIF" "$SIF_PATH"
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+      install -m 0644 "$BUNDLE_SIF" "$SIF_PATH"
+    else
+      cp -a "$BUNDLE_SIF" "$SIF_PATH"
+    fi
     ;;
   url)
     [[ -n "$SIF_URL" ]] || die "SG_LMPA_SIF_URL not set for url mode"
@@ -75,7 +132,9 @@ case "$MODE" in
     ;;
   local)
     [[ -n "$SIF_LOCAL" && -f "$SIF_LOCAL" ]] || die "SG_LMPA_SIF_LOCAL not set or file missing"
-    install -m 0644 "$SIF_LOCAL" "$SIF_PATH"
+    if [[ "$SIF_LOCAL" != "$SIF_PATH" ]]; then
+      ln -sf "$SIF_LOCAL" "$SIF_PATH"
+    fi
     ;;
   *) die "unknown MODE=$MODE" ;;
 esac

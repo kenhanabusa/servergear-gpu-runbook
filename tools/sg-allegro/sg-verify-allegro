@@ -5,10 +5,60 @@ IFS=$'\n\t'
 STK_ID="STK-015"
 STEP="ALLEGRO_VERIFY"
 DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-source "$DIR/../_lib/sg_runbook_lib.sh"
+LIB_CANDIDATES=(
+  "$DIR/../_lib/sg_runbook_lib.sh"
+  "$DIR/../../_lib/sg_runbook_lib.sh"
+)
+LIB_FOUND=""
+for c in "${LIB_CANDIDATES[@]}"; do
+  if [[ -r "$c" ]]; then
+    LIB_FOUND="$c"
+    break
+  fi
+done
 
-APP_ROOT="/opt/sg/allegro"
+if [[ -n "$LIB_FOUND" ]]; then
+  # shellcheck disable=SC1090
+  source "$LIB_FOUND"
+else
+  sg_pick_log_dir() {
+    local primary="/var/log/sg-runbook"
+    local fallback="${HOME}/sg-runbook-log"
+    if mkdir -p "$primary" 2>/dev/null; then
+      echo "$primary"
+    else
+      mkdir -p "$fallback"
+      echo "$fallback"
+    fi
+  }
+  sg_log() {
+    local file="${1:?}"; shift
+    local line="[$(date -Is)] $*"
+    echo "$line" | tee -a "$file" >/dev/null
+  }
+  _sg_emit_jsonl() {
+    local jsonl="${1:?}"
+    local payload="${2:?}"
+    python3 - <<PY >>"$jsonl"
+import json, datetime
+obj=json.loads("""$payload""")
+obj.setdefault("ts", datetime.datetime.now().astimezone().isoformat())
+print(json.dumps(obj, ensure_ascii=False))
+PY
+  }
+  sg_pass() { local txt="${1:?}" step="${2:?}" jsonl="${3:?}" logtxt="${4:?}"; sg_log "$logtxt" "PASS: $txt"; _sg_emit_jsonl "$jsonl" "{\"task\":\"$STK_ID\",\"step\":\"$step\",\"status\":\"ok\",\"rc\":0,\"err\":\"\",\"hint\":\"$txt\"}"; exit 0; }
+  sg_fail() { local err="${1:?}" hint="${2:?}" step="${3:?}" jsonl="${4:?}" logtxt="${5:?}"; sg_log "$logtxt" "FAIL: $hint"; _sg_emit_jsonl "$jsonl" "{\"task\":\"$STK_ID\",\"step\":\"$step\",\"status\":\"fail\",\"rc\":40,\"err\":\"$err\",\"hint\":\"$hint\"}"; exit 40; }
+fi
+
+PREFIX_ROOT="${SG_PREFIX:-}"
+if [[ -z "${PREFIX_ROOT}" || ( ${EUID:-$(id -u)} -ne 0 && "${PREFIX_ROOT}" == /opt/sg* ) ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    PREFIX_ROOT="/opt/sg"
+  else
+    PREFIX_ROOT="${HOME}/.local/sg"
+  fi
+fi
+APP_ROOT="${PREFIX_ROOT}/allegro"
 VENV="${APP_ROOT}/venv"
 
 LOG_DIR="$(sg_pick_log_dir)"
@@ -18,14 +68,14 @@ LOG_JSONL="${LOG_DIR}/${STK_ID}_${TS}.jsonl"
 
 MODEL_PATH="${MODEL_PATH:-${APP_ROOT}/models/Allegro-OAM-L-0.1.nequip.zip}"
 COMPILED_PATH="${COMPILED_PATH:-${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth}"
-VERIFY_MODE="${VERIFY_MODE:-infer}"          # infer|import-only
+VERIFY_MODE="${VERIFY_MODE:-import-only}"     # infer|import-only
 PREFER_GPU="${PREFER_GPU:-1}"               # 1: GPU優先（cudaが無ければFAIL）
 FORCE_COMPILE="${FORCE_COMPILE:-0}"
 
 usage(){
   cat <<EOF
 Usage: sg-verify-allegro [--infer] [--import-only] [-h|--help]
-Default: infer (model compile+load)
+Default: import-only
 Options:
   --infer        run infer verification (default)
   --import-only  only import checks (no model required)

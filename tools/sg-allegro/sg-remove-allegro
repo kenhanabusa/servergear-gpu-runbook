@@ -2,8 +2,20 @@
 set -euo pipefail
 IFS=$'\n\t'
 STK_ID="STK-015"
-APP_ROOT="/opt/sg/allegro"
+PREFIX_ROOT="${SG_PREFIX:-}"
+if [[ -z "${PREFIX_ROOT}" || ( ${EUID:-$(id -u)} -ne 0 && "${PREFIX_ROOT}" == /opt/sg* ) ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    PREFIX_ROOT="/opt/sg"
+  else
+    PREFIX_ROOT="${HOME}/.local/sg"
+  fi
+fi
+APP_ROOT="${PREFIX_ROOT}/allegro"
 LOG_DIR="/var/log/sg-runbook"
+if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+  LOG_DIR="${HOME}/sg-runbook-log"
+  mkdir -p "$LOG_DIR"
+fi
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG="${LOG_DIR}/remove_allegro_${STK_ID}_${TS}.log"
 
@@ -16,14 +28,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 log(){ local s="[$(date -Is)] $*"; echo "$s"; mkdir -p "$LOG_DIR" 2>/dev/null||true; echo "$s" >>"$LOG" 2>/dev/null||true; }
-[[ $EUID -eq 0 ]] || { log "ERROR: run as root"; exit 1; }
+if [[ "${PREFIX_ROOT}" == "/opt/sg"* ]] && [[ "${PREFIX_ROOT}" != "${HOME}"* ]] && [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  log "ERROR: run as root for /opt/sg remove, or set SG_PREFIX for user-mode"
+  exit 1
+fi
 
 safe_rm_dir() {
   local p="$1"
   case "$p" in
-    ""|"/"|"/opt"|"/opt/sg") log "ERROR: refused dangerous path: $p"; return 1 ;;
-    /opt/sg/*) rm -rf -- "$p" ;;
-    *) log "ERROR: refused path outside /opt/sg: $p"; return 1 ;;
+    ""|"/"|"/opt"|"/opt/sg"|"$HOME"|"$HOME/"|"$HOME/.local") log "ERROR: refused dangerous path: $p"; return 1 ;;
+    /opt/sg/*|"$HOME"/.local/sg/*) rm -rf -- "$p" ;;
+    *) log "ERROR: refused path outside /opt/sg or \$HOME/.local/sg: $p"; return 1 ;;
   esac
 }
 

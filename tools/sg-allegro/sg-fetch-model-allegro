@@ -2,19 +2,28 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-APP_ROOT="/opt/sg/allegro"
+PREFIX_ROOT="${SG_PREFIX:-}"
+if [[ -z "${PREFIX_ROOT}" || ( ${EUID:-$(id -u)} -ne 0 && "${PREFIX_ROOT}" == /opt/sg* ) ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    PREFIX_ROOT="/opt/sg"
+  else
+    PREFIX_ROOT="${HOME}/.local/sg"
+  fi
+fi
+APP_ROOT="${PREFIX_ROOT}/allegro"
 MODEL_DIR="${APP_ROOT}/models"
 MODEL_ZIP="${MODEL_DIR}/Allegro-OAM-L-0.1.nequip.zip"
 
 DEFAULT_MODEL_URL="https://zenodo.org/records/16980200/files/Allegro-OAM-L-0.1.nequip.zip?download=1"
 MODEL_URL="${MODEL_URL:-$DEFAULT_MODEL_URL}"
 
+echo "[INFO] prefix: ${PREFIX_ROOT}"
 echo "[INFO] target: ${MODEL_ZIP}"
 echo "[INFO] url   : ${MODEL_URL}"
 echo "[NOTE] public model download; check attribution/license before redistribution."
 
-sudo mkdir -p "$MODEL_DIR"
-sudo curl -fL --retry 3 --retry-delay 2 "$MODEL_URL" -o "$MODEL_ZIP"
-sudo ls -lh "$MODEL_ZIP"
+mkdir -p "$MODEL_DIR"
+curl -fL --retry 3 --retry-delay 2 "$MODEL_URL" -o "$MODEL_ZIP"
+ls -lh "$MODEL_ZIP"
 echo "[OK] downloaded model zip"
 echo "[NEXT] VERIFY_MODE=infer tools/sg-allegro/sg-verify-allegro"

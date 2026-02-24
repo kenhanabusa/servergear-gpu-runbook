@@ -5,6 +5,14 @@ IFS=$'\n\t'
 STK_ID="STK-016"
 STEP="LMPA_VERIFY"
 DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIX_ROOT="${SG_PREFIX:-}"
+if [[ -z "${PREFIX_ROOT}" || ( ${EUID:-$(id -u)} -ne 0 && "${PREFIX_ROOT}" == /opt/sg* ) ]]; then
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    PREFIX_ROOT="/opt/sg"
+  else
+    PREFIX_ROOT="${HOME}/.local/sg"
+  fi
+fi
 
 # log dir fallback
 pick_log_dir() {
@@ -37,24 +45,23 @@ log "log_dir=$LOG_DIR"
 command -v apptainer >/dev/null 2>&1 || fail "E_APPTAINER_NOT_FOUND" "apptainer not found; run sudo sg-install-lammps-allegro"
 
 # locate SIF
+APP_ROOT="${PREFIX_ROOT}/lammps-allegro"
 SIF_DEFAULT="/opt/containers/sg-lammps-allegro.sif"
-SIF_PATH="${SG_LMPA_SIF_PATH:-$SIF_DEFAULT}"
-if [[ -f "/opt/sg/lammps-allegro/meta/sif_path.txt" ]]; then
-  SIF_PATH_FILE="$(cat /opt/sg/lammps-allegro/meta/sif_path.txt 2>/dev/null || true)"
+SIF_PATH="${SG_LMPA_SIF_PATH:-${APP_ROOT}/sg-lammps-allegro.sif}"
+if [[ -f "${APP_ROOT}/meta/sif_path.txt" ]]; then
+  SIF_PATH_FILE="$(cat "${APP_ROOT}/meta/sif_path.txt" 2>/dev/null || true)"
   [[ -n "$SIF_PATH_FILE" ]] && SIF_PATH="$SIF_PATH_FILE"
 fi
+[[ -f "$SIF_PATH" ]] || SIF_PATH="$SIF_DEFAULT"
 log "sif=$SIF_PATH"
 [[ -f "$SIF_PATH" ]] || fail "E_SIF_MISSING" "SIF missing: $SIF_PATH (run sudo sg-install-lammps-allegro)"
 
 # sample
 SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
-INP="${SAMPLE_DIR}/in.bench1_throughput"
-DATA="${SAMPLE_DIR}/llzo_51840.data"
-[[ -f "$INP" && -f "$DATA" ]] || fail "E_LMP_SAMPLE_MISSING" "sample missing: run sg-fetch-sample-lammps"
-
-# model
+VERIFY_MODE="${VERIFY_MODE:-smoke}"   # smoke|full
+INP="${INP:-$(find "$SAMPLE_DIR" -type f -name 'in.bench1_throughput' | head -n 1 || true)}"
+DATA="${DATA:-$(find "$SAMPLE_DIR" -type f -name 'llzo_51840.data' | head -n 1 || true)}"
 MODEL="${MODEL_PATH:-${SAMPLE_DIR}/model.nequip.pth}"
-[[ -f "$MODEL" ]] || fail "E_MODEL_MISSING" "model missing: run sg-fetch-model (or set MODEL_URL) first"
 
 # decide --nv
 USE_NV="${USE_NV:-auto}"
@@ -64,6 +71,24 @@ if [[ "$USE_NV" == "auto" ]]; then
   if command -v nvidia-smi >/dev/null 2>&1; then NV_FLAG="--nv"; fi
 fi
 log "apptainer_nv=${NV_FLAG:-<none>}"
+
+if [[ "$VERIFY_MODE" == "smoke" ]]; then
+  set +e
+  apptainer exec ${NV_FLAG} "${SIF_PATH}" bash -lc '
+set -e
+LMP="$(command -v lmp 2>/dev/null || true)"
+[[ -n "$LMP" ]] || LMP="$(command -v lmp_gpu 2>/dev/null || true)"
+[[ -n "$LMP" ]] || { echo "E_LMP_NOT_INSTALLED lmp not found in container"; exit 40; }
+"$LMP" -help >/dev/null 2>&1 || true
+' > "${SAMPLE_DIR}/run_${TS}.log" 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || fail "E_LMP_RUN_FAIL" "LAMMPS smoke failed rc=$rc (see ${SAMPLE_DIR}/run_${TS}.log)"
+  pass "LAMMPS smoke OK (container + lmp command)"
+fi
+
+[[ -f "$INP" && -f "$DATA" ]] || fail "E_LMP_SAMPLE_MISSING" "sample missing: run sg-fetch-sample-lammps"
+[[ -f "$MODEL" ]] || fail "E_MODEL_MISSING" "model missing: run sg-fetch-model (or set MODEL_URL) first"
 
 # run inside container
 WORK_IN="/work"

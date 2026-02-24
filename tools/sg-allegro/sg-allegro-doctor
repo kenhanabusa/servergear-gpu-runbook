@@ -3,11 +3,37 @@ set -euo pipefail
 IFS=$'\n\t'
 STK_ID="STK-015"
 DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-source "$DIR/../_lib/sg_runbook_lib.sh"
+LIB_CANDIDATES=(
+  "$DIR/../_lib/sg_runbook_lib.sh"
+  "$DIR/../../_lib/sg_runbook_lib.sh"
+)
+LIB_FOUND=""
+for c in "${LIB_CANDIDATES[@]}"; do
+  if [[ -r "$c" ]]; then
+    LIB_FOUND="$c"
+    break
+  fi
+done
+
+if [[ -n "$LIB_FOUND" ]]; then
+  # shellcheck disable=SC1090
+  source "$LIB_FOUND"
+else
+  sg_pick_log_dir() {
+    local primary="/var/log/sg-runbook"
+    local fallback="${HOME}/sg-runbook-log"
+    if mkdir -p "$primary" 2>/dev/null; then
+      echo "$primary"
+    else
+      mkdir -p "$fallback"
+      echo "$fallback"
+    fi
+  }
+fi
 
 pick_latest() { ls -1t "$1"/"${STK_ID}"_*.jsonl 2>/dev/null | head -n 1 || true; }
-latest="$(pick_latest /var/log/sg-runbook)"
+LOG_DIR="$(sg_pick_log_dir)"
+latest="$(pick_latest "$LOG_DIR")"
 [[ -n "$latest" ]] || latest="$(pick_latest "$HOME/sg-runbook-log")"
 
 echo "[doctor] rid=${STK_ID}"
@@ -42,7 +68,7 @@ echo "hint=${HINT:-}"
 echo "next_cmds:"
 case "${ERR:-}" in
   E_TORCH_MISSING)
-    echo "  - sudo tools/sg-allegro/sg-install-allegro --yes"
+    echo "  - SG_PREFIX=\${HOME}/.local/sg tools/sg-allegro/sg-install-allegro --yes"
     echo "  - tools/sg-allegro/sg-verify-allegro"
     ;;
   E_TORCH_CUDA_MISSING)
@@ -53,7 +79,7 @@ case "${ERR:-}" in
     echo "  - tools/sg-allegro/sg-verify-allegro"
     ;;
   E_ALLEGRO_IMPORT_FAIL)
-    echo "  - sudo tools/sg-allegro/sg-install-allegro --yes"
+    echo "  - SG_PREFIX=\${HOME}/.local/sg tools/sg-allegro/sg-install-allegro --yes"
     echo "  - tools/sg-allegro/sg-verify-allegro"
     ;;
   *)

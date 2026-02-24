@@ -6,6 +6,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 SAMPLE_DIR="${SAMPLE_DIR:-$DIR/sample}"
 OUT_MODEL="${SAMPLE_DIR}/model.nequip.pth"
 BUNDLE_ROOT="${SG_LMPA_BUNDLE_ROOT:-/opt/sg/bundles/lammps-allegro}"
+PREFIX_ROOT="${SG_PREFIX:-/opt/sg}"
 
 mkdir -p "$SAMPLE_DIR"
 
@@ -39,7 +40,9 @@ fi
 
 # 3) OAM zipを落として compile（ホストにnequip-compileが必要）
 NEQUIP_COMPILE=""
-if [[ -x "/opt/sg/allegro/venv/bin/nequip-compile" ]]; then
+if [[ -x "${PREFIX_ROOT}/allegro/venv/bin/nequip-compile" ]]; then
+  NEQUIP_COMPILE="${PREFIX_ROOT}/allegro/venv/bin/nequip-compile"
+elif [[ -x "/opt/sg/allegro/venv/bin/nequip-compile" ]]; then
   NEQUIP_COMPILE="/opt/sg/allegro/venv/bin/nequip-compile"
 elif command -v nequip-compile >/dev/null 2>&1; then
   NEQUIP_COMPILE="$(command -v nequip-compile)"
