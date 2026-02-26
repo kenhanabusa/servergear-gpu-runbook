@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+OUT="$HERE/out"
+
+echo "[bundle-doctor] bundle path: $HERE"
+echo "[bundle-doctor] latest logs:"
+ls -1dt "$OUT"/logs/* 2>/dev/null | head -n 5 || true
+echo
+
+echo "[bundle-doctor] QE doctor"
+"$REPO_ROOT/tools/sg-qe-gpu-src-u/sg-doctor-qe-gpu-src-u" || true
+
+echo
+
+echo "[bundle-doctor] Allegro doctor"
+"$REPO_ROOT/tools/sg-allegro/sg-allegro-doctor" || true
+
+echo
+
+echo "[bundle-doctor] LAMMPS+Allegro doctor"
+"$REPO_ROOT/tools/sg-lammps-allegro/sg-lammps-allegro-doctor" || true

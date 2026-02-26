@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+DATE="${DATE_OVERRIDE:-$(date +%Y%m%d)}"
+TS="$(date +%Y%m%d_%H%M%S)"
+
+# Default isolated prefix (fallback from /opt/sg/bundles due permission)
+SG_PREFIX="${SG_PREFIX:-/opt/sg/qa/prefix/bundles/qe-allegro-lammps/${DATE}}"
+QA_ROOT="${QA_ROOT:-/opt/sg/qa}"
+QA_HOME="${QA_HOME:-${QA_ROOT}/home/bundle-qe-allegro-lammps-${DATE}}"
+QA_CACHE="${QA_CACHE:-${QA_ROOT}/cache/bundle-qe-allegro-lammps-${DATE}}"
+QA_TMP="${QA_TMP:-${QA_ROOT}/tmp/bundle-qe-allegro-lammps-${DATE}}"
+LOCK_FILE="${LOCK_FILE:-${QA_ROOT}/locks/qa.lock}"
+
+LOG_ROOT="$HERE/out/logs/${TS}"
+mkdir -p "$LOG_ROOT" "$HERE/out/kpi" "$HERE/out/proofpack" "$HERE/out/plots"
+mkdir -p "$(dirname "$LOCK_FILE")" "$SG_PREFIX" "$QA_HOME" "$QA_CACHE" "$QA_TMP"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[bundle-install] lock busy: $LOCK_FILE" | tee "$LOG_ROOT/install.log"
+  exit 20
+fi
+
+export SG_PREFIX
+export HOME="$QA_HOME"
+export XDG_CACHE_HOME="$QA_CACHE"
+export TMPDIR="$QA_TMP"
+export PYTHONPYCACHEPREFIX="$QA_CACHE/pycache"
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ ${EUID:-$(id -u)} -ne 0 && "$SG_PREFIX" == /opt/sg* ]]; then
+  SG_PREFIX="$HOME/.local/sg"
+  export SG_PREFIX
+fi
+
+# QE runbook uses PREFIX/WORKDIR/LOGDIR (not SG_PREFIX)
+export PREFIX="${PREFIX:-$HOME/.local/sg/qe-gpu-src}"
+export WORKDIR="${WORKDIR:-$HOME/.cache/sg/qe-gpu-src-u}"
+QE_REUSE_HOST="${QE_REUSE_HOST:-1}"
+QE_HOST_PREFIX="${QE_HOST_PREFIX:-/home/dl/.local/sg/qe-gpu-src}"
+
+meta="$LOG_ROOT/meta.txt"
+{
+  echo "ts=$TS"
+  echo "sg_prefix=$SG_PREFIX"
+  echo "home=$HOME"
+  echo "cache=$XDG_CACHE_HOME"
+  echo "tmp=$TMPDIR"
+  echo "qe_prefix=$PREFIX"
+  echo "repo_root=$REPO_ROOT"
+  echo "host=$(hostname)"
+  echo "user=$(id -un)"
+} > "$meta"
+
+run_step() {
+  local name="$1"; shift
+  local lf="$LOG_ROOT/${name}.log"
+  echo "[bundle-install] START $name" | tee -a "$LOG_ROOT/install.log"
+  /usr/bin/time -f "WALL %e" -o "$LOG_ROOT/${name}.wall" "$@" >"$lf" 2>&1
+  echo "[bundle-install] END $name" | tee -a "$LOG_ROOT/install.log"
+}
+
+# 1) QE (skip if already installed / reuse host build)
+if [[ ! -x "$PREFIX/qe-7.5/bin/pw.x" && "$QE_REUSE_HOST" == "1" && -x "$QE_HOST_PREFIX/qe-7.5/bin/pw.x" ]]; then
+  mkdir -p "$PREFIX"
+  ln -sfn "$QE_HOST_PREFIX/qe-7.5" "$PREFIX/qe-7.5"
+  echo "[bundle-install] linked host QE build: $QE_HOST_PREFIX/qe-7.5 -> $PREFIX/qe-7.5" | tee -a "$LOG_ROOT/install.log"
+fi
+
+if [[ -x "$PREFIX/qe-7.5/bin/pw.x" ]]; then
+  echo "[bundle-install] skip qe install (exists: $PREFIX/qe-7.5/bin/pw.x)" | tee -a "$LOG_ROOT/install.log"
+else
+  export LOGDIR="$LOG_ROOT/qe"
+  mkdir -p "$LOGDIR"
+  run_step qe_install "$REPO_ROOT/tools/sg-qe-gpu-src-u/sg-install-qe-gpu-src-u"
+fi
+
+# 2) Allegro
+if [[ -x "$SG_PREFIX/allegro/venv/bin/python" ]]; then
+  echo "[bundle-install] skip allegro install (venv exists)" | tee -a "$LOG_ROOT/install.log"
+else
+  run_step allegro_install "$REPO_ROOT/tools/sg-allegro/sg-install-allegro" --yes
+fi
+
+if [[ -f "$SG_PREFIX/allegro/models/Allegro-OAM-L-0.1.nequip.zip" ]]; then
+  echo "[bundle-install] skip allegro model fetch (exists)" | tee -a "$LOG_ROOT/install.log"
+else
+  run_step allegro_fetch_model "$REPO_ROOT/tools/sg-allegro/sg-fetch-model-allegro"
+fi
+
+# 3) LAMMPS+Allegro (reuse /opt/containers SIF if present)
+export SG_LMPA_MODE="${SG_LMPA_MODE:-auto}"
+if [[ -f "$SG_PREFIX/lammps-allegro/sg-lammps-allegro.sif" || -f "/opt/containers/sg-lammps-allegro.sif" ]]; then
+  run_step lmpa_install "$REPO_ROOT/tools/sg-lammps-allegro/sg-install-lammps-allegro" --yes --mode "$SG_LMPA_MODE"
+else
+  echo "[bundle-install] no SIF detected; install will require SG_LMPA_SIF_URL/SG_LMPA_SIF_LOCAL" | tee -a "$LOG_ROOT/install.log"
+  run_step lmpa_install "$REPO_ROOT/tools/sg-lammps-allegro/sg-install-lammps-allegro" --yes --mode "$SG_LMPA_MODE"
+fi
+
+run_step lmpa_fetch_sample "$REPO_ROOT/tools/sg-lammps-allegro/sg-fetch-sample-lammps"
+run_step lmpa_fetch_model "$REPO_ROOT/tools/sg-lammps-allegro/sg-fetch-model"
+
+echo "$TS" > "$HERE/out/last_install_ts.txt"
+echo "[bundle-install] PASS ts=$TS" | tee -a "$LOG_ROOT/install.log"

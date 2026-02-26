@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+DATE="${DATE_OVERRIDE:-$(date +%Y%m%d)}"
+TS="$(date +%Y%m%d_%H%M%S)"
+
+SG_PREFIX="${SG_PREFIX:-/opt/sg/qa/prefix/bundles/qe-allegro-lammps/${DATE}}"
+QA_ROOT="${QA_ROOT:-/opt/sg/qa}"
+QA_HOME="${QA_HOME:-${QA_ROOT}/home/bundle-qe-allegro-lammps-${DATE}}"
+QA_CACHE="${QA_CACHE:-${QA_ROOT}/cache/bundle-qe-allegro-lammps-${DATE}}"
+QA_TMP="${QA_TMP:-${QA_ROOT}/tmp/bundle-qe-allegro-lammps-${DATE}}"
+LOCK_FILE="${LOCK_FILE:-${QA_ROOT}/locks/qa.lock}"
+
+LOG_ROOT="$HERE/out/logs/${TS}"
+mkdir -p "$LOG_ROOT" "$HERE/out/kpi" "$HERE/out/proofpack" "$HERE/out/plots"
+mkdir -p "$(dirname "$LOCK_FILE")" "$SG_PREFIX" "$QA_HOME" "$QA_CACHE" "$QA_TMP"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[bundle-verify] lock busy: $LOCK_FILE" | tee "$LOG_ROOT/verify.log"
+  exit 20
+fi
+
+export SG_PREFIX
+export HOME="$QA_HOME"
+export XDG_CACHE_HOME="$QA_CACHE"
+export TMPDIR="$QA_TMP"
+export PYTHONPYCACHEPREFIX="$QA_CACHE/pycache"
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ ${EUID:-$(id -u)} -ne 0 && "$SG_PREFIX" == /opt/sg* ]]; then
+  SG_PREFIX="$HOME/.local/sg"
+  export SG_PREFIX
+fi
+MPI_BIN_CANDIDATE="/opt/nvidia/hpc_sdk/Linux_x86_64/26.1/comm_libs/mpi/bin"
+if [[ -x "$MPI_BIN_CANDIDATE/mpirun" ]]; then
+  export PATH="$MPI_BIN_CANDIDATE:$PATH"
+fi
+# NVHPC MPI needs CUDA-matched comm libs selection on some hosts.
+export NVCOMPILER_COMM_LIBS_HOME="${NVCOMPILER_COMM_LIBS_HOME:-/opt/nvidia/hpc_sdk/Linux_x86_64/26.1/comm_libs/13.1}"
+export PREFIX="${PREFIX:-$HOME/.local/sg/qe-gpu-src}"
+export WORKDIR="${WORKDIR:-$HOME/.cache/sg/qe-gpu-src-u}"
+
+KPI_CSV="$HERE/out/kpi/e2e_metrics.csv"
+if [[ ! -f "$KPI_CSV" ]]; then
+  echo "ts,step,status,wall_sec,notes" > "$KPI_CSV"
+fi
+
+step_log="$LOG_ROOT/verify.log"
+{
+  echo "ts=$TS"
+  echo "sg_prefix=$SG_PREFIX"
+  echo "home=$HOME"
+  echo "qe_prefix=$PREFIX"
+} > "$LOG_ROOT/meta.txt"
+
+D_PID=""
+P_PID=""
+start_gpu_mon() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi dmon -s pucmem -d 2 > "$LOG_ROOT/nvidia_dmon.log" 2>&1 & D_PID=$!
+    nvidia-smi pmon -s um -d 2 > "$LOG_ROOT/nvidia_pmon.log" 2>&1 & P_PID=$!
+  fi
+}
+stop_gpu_mon() {
+  [[ -n "$D_PID" ]] && kill "$D_PID" 2>/dev/null || true
+  [[ -n "$P_PID" ]] && kill "$P_PID" 2>/dev/null || true
+}
+trap stop_gpu_mon EXIT
+
+run_timed() {
+  local step="$1"; shift
+  local lf="$LOG_ROOT/${step}.log"
+  local wf="$LOG_ROOT/${step}.wall"
+  local t0 t1 wall rc status notes
+  t0="$(date +%s)"
+  set +e
+  /usr/bin/time -f "WALL %e" -o "$wf" "$@" >"$lf" 2>&1
+  rc=$?
+  set -e
+  t1="$(date +%s)"
+  wall="$((t1-t0))"
+  status="PASS"
+  notes=""
+  if [[ $rc -ne 0 ]]; then
+    status="FAIL"
+    notes="rc=$rc"
+  fi
+  echo "$TS,$step,$status,$wall,$notes" >> "$KPI_CSV"
+  echo "[bundle-verify] $step $status wall=${wall}s" | tee -a "$step_log"
+  return $rc
+}
+
+start_gpu_mon
+nvidia-smi > "$LOG_ROOT/nvidia_smi_pre.txt" 2>&1 || true
+overall_rc=0
+
+# QE minimal SCF
+mkdir -p "$WORKDIR/inputs/pseudos"
+if [[ ! -f "$WORKDIR/inputs/pseudos/Si.pz-vbc.UPF" ]]; then
+  curl -fsSL "https://pseudopotentials.quantum-espresso.org/upf_files/Si.pz-vbc.UPF" -o "$WORKDIR/inputs/pseudos/Si.pz-vbc.UPF"
+fi
+export LOGDIR="$LOG_ROOT/qe"
+mkdir -p "$LOGDIR"
+run_timed qe_single "$REPO_ROOT/tools/sg-qe-gpu-src-u/sg-verify-qe-gpu-src-u" --single || overall_rc=1
+
+# Allegro inference
+export MODEL_PATH="$SG_PREFIX/allegro/models/Allegro-OAM-L-0.1.nequip.zip"
+export COMPILED_PATH="$SG_PREFIX/allegro/cache/compiled_allegro.nequip.pth"
+export VERIFY_MODE="infer"
+run_timed allegro_infer "$REPO_ROOT/tools/sg-allegro/sg-verify-allegro" --infer || overall_rc=1
+
+# LAMMPS+Allegro short MD (10 steps on tiny 4-atom system)
+SIF_PATH="${SG_LMPA_SIF_PATH:-$SG_PREFIX/lammps-allegro/sg-lammps-allegro.sif}"
+[[ -f "$SIF_PATH" ]] || SIF_PATH="/opt/containers/sg-lammps-allegro.sif"
+SAMPLE_DIR="$REPO_ROOT/tools/sg-lammps-allegro/sample/lammps_allegro_llzo_50k_inputs"
+[[ -f "$SAMPLE_DIR/in.bench1_throughput" ]] || { echo "missing sample input" | tee -a "$step_log"; exit 40; }
+[[ -f "$SAMPLE_DIR/llzo_51840.data" ]] || { echo "missing sample data" | tee -a "$step_log"; exit 40; }
+[[ -f "$REPO_ROOT/tools/sg-lammps-allegro/sample/model.nequip.pth" ]] || { echo "missing sample model" | tee -a "$step_log"; exit 40; }
+
+LMP_WORK="$LOG_ROOT/lammps_short"
+mkdir -p "$LMP_WORK"
+cp -a "$REPO_ROOT/tools/sg-lammps-allegro/sample/model.nequip.pth" "$LMP_WORK/"
+
+MODEL_OUT_DIR="$HERE/out/models/$TS/deployed"
+mkdir -p "$MODEL_OUT_DIR"
+cp -a "$REPO_ROOT/tools/sg-lammps-allegro/sample/model.nequip.pth" "$MODEL_OUT_DIR/model.nequip.pth"
+
+cat > "$LMP_WORK/in.short.in" <<'EOF'
+units metal
+atom_style atomic
+boundary p p p
+
+region box block 0 10 0 10 0 10
+create_box 4 box
+create_atoms 1 single 1.0 1.0 1.0
+create_atoms 2 single 3.0 3.0 3.0
+create_atoms 3 single 5.0 5.0 5.0
+create_atoms 4 single 7.0 7.0 7.0
+
+mass 1 6.94
+mass 2 138.90547
+mass 3 91.224
+mass 4 15.999
+
+pair_style allegro6464
+pair_coeff * * model.nequip.pth Li La Zr O
+
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+timestep 0.001
+
+velocity all create 300.0 12345 mom yes rot yes dist gaussian
+fix int all nve
+thermo 5
+run 10
+EOF
+
+run_timed lammps_short apptainer exec --nv --bind "$LMP_WORK:/work" "$SIF_PATH" bash -lc '
+set -e
+LMP=""
+for c in /opt/lammps/install/bin/lmp /opt/lammps/bin/lmp /usr/local/bin/lmp /usr/bin/lmp; do
+  [[ -x "$c" ]] && LMP="$c" && break
+done
+[[ -n "$LMP" ]] || LMP="$(command -v lmp || true)"
+[[ -n "$LMP" ]] || LMP="$(command -v lmp_gpu || true)"
+[[ -n "$LMP" ]]
+cd /work
+"$LMP" -in in.short.in
+' || overall_rc=1
+
+nvidia-smi > "$LOG_ROOT/nvidia_smi_post.txt" 2>&1 || true
+
+# quick KPI summary markdown
+SUMMARY_MD="$HERE/out/kpi/latest_summary.md"
+{
+  echo "# Bundle E2E Result ($TS)"
+  echo
+  echo "- SG_PREFIX: \
+$SG_PREFIX"
+  echo "- QE PREFIX: \
+$PREFIX"
+  echo "- Log dir: \
+$LOG_ROOT"
+  echo
+  echo "| step | status | wall_sec |"
+  echo "|---|---|---:|"
+  tail -n +2 "$KPI_CSV" | awk -F, -v ts="$TS" '$1==ts{printf("| %s | %s | %s |\n",$2,$3,$4)}'
+} > "$SUMMARY_MD"
+
+# proofpack zip
+PACK_DIR="$HERE/out/proofpack"
+PACK_BASE="proof_bundle_qe_allegro_lammps_${TS}"
+cp -a "$LOG_ROOT" "$PACK_DIR/${PACK_BASE}_logs"
+cp -a "$SUMMARY_MD" "$PACK_DIR/${PACK_BASE}_summary.md"
+cp -a "$KPI_CSV" "$PACK_DIR/${PACK_BASE}_kpi.csv"
+(
+  cd "$PACK_DIR"
+  zip -qr "${PACK_BASE}.zip" "${PACK_BASE}_logs" "${PACK_BASE}_summary.md" "${PACK_BASE}_kpi.csv"
+  sha256sum "${PACK_BASE}.zip" > "${PACK_BASE}.sha256"
+)
+
+echo "$TS" > "$HERE/out/last_verify_ts.txt"
+if [[ "$overall_rc" -eq 0 ]]; then
+  echo "[bundle-verify] PASS ts=$TS" | tee -a "$step_log"
+else
+  echo "[bundle-verify] FAIL ts=$TS (see step logs)" | tee -a "$step_log"
+fi
+exit "$overall_rc"

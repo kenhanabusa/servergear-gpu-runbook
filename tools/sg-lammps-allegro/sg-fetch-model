@@ -30,7 +30,8 @@ if [[ -n "${MODEL_URL:-}" ]]; then
 fi
 
 # 2) STK-015 compiled cacheを再利用
-if [[ -f "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" ]]; then
+REQUIRE_PAIR_ALLEGRO="${REQUIRE_PAIR_ALLEGRO:-1}"
+if [[ "$REQUIRE_PAIR_ALLEGRO" != "1" ]] && [[ -f "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" ]]; then
   echo "[fetch-model] reuse STK-015 compiled model -> $OUT_MODEL"
   cp -a "${HOME}/.cache/sg-allegro/compiled_allegro.nequip.pth" "$OUT_MODEL"
   ls -lh "$OUT_MODEL"
@@ -59,12 +60,92 @@ DEFAULT_OAM_URL="https://zenodo.org/records/16980200/files/Allegro-OAM-L-0.1.neq
 OAM_URL="${OAM_URL:-$DEFAULT_OAM_URL}"
 
 command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl not found" >&2; exit 2; }
-echo "[fetch-model] download OAM zip -> $OAM_ZIP"
-curl -fL --retry 3 --retry-delay 2 "$OAM_URL" -o "$OAM_ZIP"
+if [[ ! -s "$OAM_ZIP" ]] && [[ -f "${PREFIX_ROOT}/allegro/models/Allegro-OAM-L-0.1.nequip.zip" ]]; then
+  echo "[fetch-model] copy OAM zip from ${PREFIX_ROOT}/allegro/models"
+  cp -a "${PREFIX_ROOT}/allegro/models/Allegro-OAM-L-0.1.nequip.zip" "$OAM_ZIP"
+fi
+
+zip_ok=0
+if [[ -s "$OAM_ZIP" ]] && command -v unzip >/dev/null 2>&1; then
+  if unzip -t "$OAM_ZIP" >/dev/null 2>&1; then
+    zip_ok=1
+  fi
+fi
+if [[ "$zip_ok" -eq 1 ]]; then
+  echo "[fetch-model] reuse existing OAM zip: $OAM_ZIP"
+else
+  rm -f "$OAM_ZIP"
+  echo "[fetch-model] download OAM zip -> $OAM_ZIP"
+  curl -fL --retry 3 --retry-delay 2 "$OAM_URL" -o "$OAM_ZIP"
+fi
 
 DEV="cpu"
 if command -v nvidia-smi >/dev/null 2>&1; then DEV="cuda"; fi
-echo "[compile] $NEQUIP_COMPILE $OAM_ZIP -> $OUT_MODEL (device=$DEV)"
-"$NEQUIP_COMPILE" "$OAM_ZIP" "$OUT_MODEL" --device "$DEV" --mode torchscript
+echo "[compile] $NEQUIP_COMPILE $OAM_ZIP -> $OUT_MODEL (device=$DEV, target=pair_allegro)"
+"$NEQUIP_COMPILE" "$OAM_ZIP" "$OUT_MODEL" --device "$DEV" --mode torchscript --target pair_allegro
+
+# LAMMPS pair_allegro checks metadata keys embedded in TorchScript extra files.
+# NequIP>=0.14 compile output may miss these keys, so inject them from package metadata.
+NEQUIP_PY=""
+if [[ -x "$(dirname "$NEQUIP_COMPILE")/python" ]]; then
+  NEQUIP_PY="$(dirname "$NEQUIP_COMPILE")/python"
+elif command -v python3 >/dev/null 2>&1; then
+  NEQUIP_PY="$(command -v python3)"
+fi
+
+if [[ -n "$NEQUIP_PY" ]]; then
+  "$NEQUIP_PY" - "$OAM_ZIP" "$OUT_MODEL" <<'PY'
+import re, sys, zipfile, torch
+zip_path, model_path = sys.argv[1], sys.argv[2]
+z = zipfile.ZipFile(zip_path)
+config = ""
+meta_txt = ""
+for name in z.namelist():
+    if name.endswith("config.yaml"):
+        config = z.read(name).decode("utf-8", "ignore")
+    if name.endswith("package_metadata.txt"):
+        meta_txt = z.read(name).decode("utf-8", "ignore")
+
+pairs = []
+for line in meta_txt.splitlines():
+    m = re.match(r"\s*(\d+):\s*([A-Za-z][A-Za-z]?)\s*$", line)
+    if m:
+        pairs.append((int(m.group(1)), m.group(2)))
+pairs.sort()
+
+type_names = " ".join(sym for _, sym in pairs)
+r_max = "7"
+for line in config.splitlines():
+    m = re.search(r"\br_max:\s*([0-9.]+)", line)
+    if m:
+        r_max = m.group(1)
+        break
+allow_tf32 = "0"
+for line in config.splitlines():
+    if "allow_tf32:" in line:
+        allow_tf32 = "1" if "true" in line.lower() else "0"
+        break
+nequip_ver = "0.14.0"
+m = re.search(r"\bnequip:\s*([0-9][^\s]*)", meta_txt)
+if m:
+    nequip_ver = m.group(1)
+
+extra = {
+    "config": config,
+    "nequip_version": nequip_ver,
+    "r_max": str(r_max),
+    "n_species": str(len(pairs) if pairs else 0),
+    "type_names": type_names,
+    "_jit_bailout_depth": "",
+    "_jit_fusion_strategy": "",
+    "allow_tf32": allow_tf32,
+    "per_edge_type_cutoff": "",
+}
+model = torch.jit.load(model_path, map_location="cpu")
+torch.jit.save(model, model_path, _extra_files=extra)
+print("[meta] injected deploy-style metadata into", model_path)
+PY
+fi
+
 ls -lh "$OUT_MODEL"
 echo "[OK] compiled model"
