@@ -7,6 +7,7 @@ BKP_DIR="$HERE/out/backup"
 
 SLURM_CONF_PATH="${SLURM_CONF_PATH:-/etc/slurm/slurm.conf}"
 JOB_SUBMIT_PATH="${JOB_SUBMIT_PATH:-/etc/slurm/job_submit.lua}"
+GRES_CONF_PATH="${GRES_CONF_PATH:-/etc/slurm/gres.conf}"
 RESTORE_TS="${RESTORE_TS:-}"
 
 for c in sudo ls sed grep; do
@@ -24,9 +25,11 @@ fi
 if [[ -n "$RESTORE_TS" ]]; then
   CONF_BAK="$BKP_DIR/slurm.conf.bak.$RESTORE_TS"
   LUA_BAK="$BKP_DIR/job_submit.lua.bak.$RESTORE_TS"
+  GRES_BAK="$BKP_DIR/gres.conf.bak.$RESTORE_TS"
 else
   CONF_BAK="$(ls -1t "$BKP_DIR"/slurm.conf.bak.* 2>/dev/null | head -n 1 || true)"
   LUA_BAK="$(ls -1t "$BKP_DIR"/job_submit.lua.bak.* 2>/dev/null | head -n 1 || true)"
+  GRES_BAK="$(ls -1t "$BKP_DIR"/gres.conf.bak.* 2>/dev/null | head -n 1 || true)"
 fi
 
 if [[ -z "$CONF_BAK" ]] || [[ ! -f "$CONF_BAK" ]]; then
@@ -43,6 +46,13 @@ if [[ -n "$LUA_BAK" ]] && [[ -f "$LUA_BAK" ]]; then
 else
   echo "no job_submit.lua backup found, remove active plugin file"
   sudo rm -f "$JOB_SUBMIT_PATH"
+fi
+
+if [[ -n "$GRES_BAK" ]] && [[ -f "$GRES_BAK" ]]; then
+  echo "restore gres.conf from: $GRES_BAK"
+  sudo cp -a "$GRES_BAK" "$GRES_CONF_PATH"
+else
+  echo "no gres.conf backup found, skip gres restore"
 fi
 
 sudo scontrol reconfigure

@@ -11,10 +11,13 @@ mkdir -p "$GEN_DIR" "$BKP_DIR"
 
 SLURM_CONF_PATH="${SLURM_CONF_PATH:-/etc/slurm/slurm.conf}"
 JOB_SUBMIT_PATH="${JOB_SUBMIT_PATH:-/etc/slurm/job_submit.lua}"
+GRES_CONF_PATH="${GRES_CONF_PATH:-/etc/slurm/gres.conf}"
 GPU_MARGIN="${GPU_MARGIN:-0.10}"
 CPU_MARGIN="${CPU_MARGIN:-0.15}"
 NODE_NAME="${NODE_NAME:-}"
 APPLY_CHANGES="${APPLY_CHANGES:-1}"
+APPLY_GRES_CONF="${APPLY_GRES_CONF:-0}"
+GRES_GPU_TYPE="${GRES_GPU_TYPE:-A100-80GB}"
 
 for c in scontrol awk sed python3 install sudo; do
   if ! command -v "$c" >/dev/null 2>&1; then
@@ -77,7 +80,7 @@ if [[ "$TOTAL_CPUS" -le 0 ]]; then
   exit 6
 fi
 if [[ "$TOTAL_GPUS" -le 0 ]]; then
-  echo "ERROR: GPU count parsed as 0 (Gres=$GRES_VAL). Override not implemented in this script." >&2
+  echo "ERROR: GPU count parsed as 0 (Gres=$GRES_VAL)." >&2
   exit 7
 fi
 
@@ -107,6 +110,13 @@ echo "generated: $GENERATED_LUA"
 echo "node_line: $NODE_LINE"
 echo "computed mem_per_gpu_mb=$MEM_PER_GPU_MB mem_per_cpu_mb=$MEM_PER_CPU_MB"
 
+GENERATED_GRES=""
+if [[ "$APPLY_GRES_CONF" == "1" ]]; then
+  GENERATED_GRES="$OUT_DIR/gres.conf.generated"
+  GRES_GPU_TYPE="$GRES_GPU_TYPE" GRES_OUTPUT="$GENERATED_GRES" "$HERE/sg-generate-gres-conf"
+  echo "generated_gres: $GENERATED_GRES"
+fi
+
 if [[ "$APPLY_CHANGES" != "1" ]]; then
   echo "APPLY_CHANGES=$APPLY_CHANGES, skip /etc apply"
   exit 0
@@ -115,6 +125,9 @@ fi
 BKP_TS="$TS"
 sudo cp -a "$SLURM_CONF_PATH" "$BKP_DIR/slurm.conf.bak.$BKP_TS"
 sudo cp -a "$JOB_SUBMIT_PATH" "$BKP_DIR/job_submit.lua.bak.$BKP_TS" 2>/dev/null || true
+if [[ "$APPLY_GRES_CONF" == "1" ]]; then
+  sudo cp -a "$GRES_CONF_PATH" "$BKP_DIR/gres.conf.bak.$BKP_TS" 2>/dev/null || true
+fi
 
 sudo install -m 0644 "$GENERATED_LUA" "$JOB_SUBMIT_PATH"
 if grep -q '^JobSubmitPlugins=' "$SLURM_CONF_PATH"; then
@@ -122,8 +135,14 @@ if grep -q '^JobSubmitPlugins=' "$SLURM_CONF_PATH"; then
 else
   echo 'JobSubmitPlugins=lua' | sudo tee -a "$SLURM_CONF_PATH" >/dev/null
 fi
+if [[ "$APPLY_GRES_CONF" == "1" ]]; then
+  sudo install -m 0644 "$GENERATED_GRES" "$GRES_CONF_PATH"
+fi
 
 sudo scontrol reconfigure
 
 echo "applied: $JOB_SUBMIT_PATH"
-echo "backups: $BKP_DIR/slurm.conf.bak.$BKP_TS and job_submit.lua.bak.$BKP_TS (if existed)"
+if [[ "$APPLY_GRES_CONF" == "1" ]]; then
+  echo "applied: $GRES_CONF_PATH"
+fi
+echo "backups: $BKP_DIR/slurm.conf.bak.$BKP_TS, job_submit.lua.bak.$BKP_TS, gres.conf.bak.$BKP_TS (if existed)"

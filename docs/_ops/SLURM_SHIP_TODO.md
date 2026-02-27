@@ -7,6 +7,7 @@
 - [ ] `scontrol reconfigure` を実行した（無停止反映）
 - [ ] GPUジョブ（mem無指定）で `ReqTRES` の `mem` が自動付与されることを確認
 - [ ] CPU-onlyジョブ（mem無指定）で `ReqTRES` の `mem` が自動付与されることを確認
+- [ ] `nvidia-smi topo -m` 由来の CPU Affinity で `gres.conf` を生成/適用し、GPUごとの `Cores=` が一致することを確認
 - [ ] 問題時の切り戻し（plugin無効化＋reconfigure）手順を確認
 
 ## Policy
@@ -17,6 +18,10 @@
   - `mem_per_cpu_mb = floor(515649 * 0.85 / 64) = 6848 MB`
   - `req_mem_mb = cpus * mem_per_cpu_mb`
 - 明示指定 (`--mem`, `--mem-per-cpu`, `--mem-per-gpu`, `TRES mem=`) がある場合は上書きしない。
+
+- GRES CPU affinity:
+  - `nvidia-smi topo -m` の `CPU Affinity` を `gres.conf` の `Cores=` に反映
+  - 例(a100x4): `GPU0/1 -> 0-31`, `GPU2/3 -> 32-63`
 
 ## Backup / Apply
 ```bash

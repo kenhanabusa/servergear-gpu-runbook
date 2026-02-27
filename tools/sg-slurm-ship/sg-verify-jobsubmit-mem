@@ -15,6 +15,8 @@ TOTAL_CPUS="${TOTAL_CPUS:-64}"
 TOTAL_GPUS="${TOTAL_GPUS:-4}"
 GPU_MARGIN="${GPU_MARGIN:-0.10}"
 CPU_MARGIN="${CPU_MARGIN:-0.15}"
+GRES_CONF_PATH="${GRES_CONF_PATH:-/etc/slurm/gres.conf}"
+GRES_GPU_TYPE="${GRES_GPU_TYPE:-A100-80GB}"
 
 for c in sbatch scontrol python3 rg; do
   if ! command -v "$c" >/dev/null 2>&1; then
@@ -51,11 +53,42 @@ chmod +x "$GPU_SH" "$CPU_SH"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG="$OUT_DIR/verify_${TS}.log"
+EXPECTED_GRES="$OUT_DIR/gres.expected_${TS}.conf"
 {
   echo "timestamp=$TS"
   echo "partition=$PARTITION"
   echo "expect_gpu_mem_mb=$EXPECT_GPU_MEM"
   echo "expect_cpu_mem_mb=$EXPECT_CPU_MEM"
+
+  echo "== gres.conf check =="
+  GRES_GEN_LOG="$OUT_DIR/gres_gen_${TS}.log"
+  GRES_GPU_TYPE="$GRES_GPU_TYPE" GRES_OUTPUT="$EXPECTED_GRES" "$HERE/sg-generate-gres-conf" >"$GRES_GEN_LOG"
+  cat "$GRES_GEN_LOG"
+
+  echo "expected_gres_lines:"
+  sed -n '1,20p' "$EXPECTED_GRES"
+  if [[ -r "$GRES_CONF_PATH" ]]; then
+    echo "actual_gres_lines:"
+    rg -n '^Name=gpu ' "$GRES_CONF_PATH" || true
+    python3 - "$EXPECTED_GRES" "$GRES_CONF_PATH" <<'PY'
+import re, sys
+from pathlib import Path
+exp = Path(sys.argv[1]).read_text().splitlines()
+act = Path(sys.argv[2]).read_text().splitlines()
+def norm(lines):
+    out=[]
+    for ln in lines:
+        ln=ln.strip()
+        if not ln.startswith("Name=gpu"):
+            continue
+        out.append(re.sub(r"\s+", " ", ln))
+    return sorted(out)
+print("gres_match=PASS" if norm(exp)==norm(act) else "gres_match=WARN")
+PY
+  else
+    echo "INFO: $GRES_CONF_PATH is not readable without sudo"
+    echo "INFO: run this manually: sudo rg -n '^Name=gpu ' $GRES_CONF_PATH"
+  fi
 
   echo "== gpu memcheck submit =="
   set +e

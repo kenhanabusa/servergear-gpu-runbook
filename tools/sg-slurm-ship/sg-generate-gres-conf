@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT_DIR="$HERE/out"
+mkdir -p "$OUT_DIR"
+
+GRES_GPU_TYPE="${GRES_GPU_TYPE:-A100-80GB}"
+GRES_OUTPUT="${GRES_OUTPUT:-$OUT_DIR/gres.conf.generated}"
+
+for c in nvidia-smi python3; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "ERROR: command not found: $c" >&2
+    exit 2
+  fi
+done
+
+python3 - "$GRES_GPU_TYPE" "$GRES_OUTPUT" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+gpu_type = sys.argv[1]
+out_path = Path(sys.argv[2])
+
+try:
+    text = subprocess.check_output(["nvidia-smi", "topo", "-m"], text=True, stderr=subprocess.STDOUT)
+except subprocess.CalledProcessError as e:
+    raise SystemExit(f"ERROR: failed to run nvidia-smi topo -m: {e.output.strip()}")
+
+# Drop ANSI escape sequences from nvidia-smi formatting.
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+lines = []
+for ln in text.splitlines():
+    if ln.strip().startswith("Legend:"):
+        break
+    if ln.strip():
+        lines.append(ln.rstrip("\n"))
+
+if not lines:
+    raise SystemExit("ERROR: empty topo output")
+
+header = None
+for ln in lines:
+    if "CPU Affinity" in ln:
+        header = [c.strip() for c in re.split(r"\t+", ln.strip())]
+        break
+if header is None:
+    raise SystemExit("ERROR: failed to locate CPU Affinity header")
+
+try:
+    cpu_col = header.index("CPU Affinity")
+except ValueError:
+    raise SystemExit("ERROR: CPU Affinity column missing")
+
+records = []
+for ln in lines:
+    s = ln.strip()
+    m = re.match(r"^(GPU)(\d+)\b", s)
+    if not m:
+        continue
+    row = [c.strip() for c in re.split(r"\t+", s)]
+    # Skip table header like: GPU0 GPU1 ... CPU Affinity
+    if len(row) > 1 and re.match(r"^GPU\d+$", row[1]):
+        continue
+    idx = int(m.group(2))
+    row_cpu_col = cpu_col + 1
+    if row_cpu_col >= len(row):
+        raise SystemExit(f"ERROR: CPU Affinity column out of range for row: {s}")
+    affinity = row[row_cpu_col]
+    if not re.match(r"^[0-9,-]+$", affinity):
+        raise SystemExit(f"ERROR: invalid CPU Affinity '{affinity}' for GPU{idx}")
+    records.append((idx, affinity))
+
+if not records:
+    raise SystemExit("ERROR: no GPU rows parsed from nvidia-smi topo -m")
+
+records.sort(key=lambda x: x[0])
+out_path.parent.mkdir(parents=True, exist_ok=True)
+with out_path.open("w", encoding="utf-8") as f:
+    for idx, affinity in records:
+        f.write(f"Name=gpu Type={gpu_type} File=/dev/nvidia{idx} Cores={affinity}\n")
+
+print(str(out_path))
+for idx, affinity in records:
+    print(f"Name=gpu Type={gpu_type} File=/dev/nvidia{idx} Cores={affinity}")
+PY
