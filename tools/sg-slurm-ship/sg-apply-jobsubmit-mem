@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATE="$HERE/templates/job_submit.lua.in"
+OUT_DIR="$HERE/out"
+GEN_DIR="$OUT_DIR/generated"
+BKP_DIR="$OUT_DIR/backup"
+mkdir -p "$GEN_DIR" "$BKP_DIR"
+
+SLURM_CONF_PATH="${SLURM_CONF_PATH:-/etc/slurm/slurm.conf}"
+JOB_SUBMIT_PATH="${JOB_SUBMIT_PATH:-/etc/slurm/job_submit.lua}"
+GPU_MARGIN="${GPU_MARGIN:-0.10}"
+CPU_MARGIN="${CPU_MARGIN:-0.15}"
+NODE_NAME="${NODE_NAME:-}"
+APPLY_CHANGES="${APPLY_CHANGES:-1}"
+
+for c in scontrol awk sed python3 install sudo; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "ERROR: command not found: $c" >&2
+    exit 2
+  fi
+done
+
+if [[ ! -f "$TEMPLATE" ]]; then
+  echo "ERROR: missing template: $TEMPLATE" >&2
+  exit 3
+fi
+
+NODE_LINE=""
+if [[ -n "$NODE_NAME" ]]; then
+  NODE_LINE="$(scontrol show node "$NODE_NAME" -o | head -n 1)"
+else
+  NODE_LINE="$(scontrol show node -o | head -n 1)"
+fi
+if [[ -z "$NODE_LINE" ]]; then
+  echo "ERROR: failed to query slurm node" >&2
+  exit 4
+fi
+
+parse_key() {
+  local key="$1"
+  awk -v k="$key" '{for(i=1;i<=NF;i++){if($i ~ ("^"k"=")){sub("^"k"=", "", $i); print $i; exit}}}' <<<"$NODE_LINE"
+}
+
+parse_gpu_count_from_gres() {
+  local gres="$1"
+  python3 - "$gres" <<'PY'
+import re, sys
+gres = (sys.argv[1] or "").lower()
+count = 0
+for tok in gres.split(","):
+    if "gpu" not in tok:
+        continue
+    m = re.search(r"[:=]([0-9]+)\s*$", tok)
+    if m:
+        count += int(m.group(1))
+    else:
+        count += 1
+print(count)
+PY
+}
+
+TOTAL_MEM_MB="$(parse_key RealMemory)"
+TOTAL_CPUS="$(parse_key CPUTot)"
+GRES_VAL="$(parse_key Gres)"
+TOTAL_GPUS="$(parse_gpu_count_from_gres "$GRES_VAL")"
+
+if ! [[ "$TOTAL_MEM_MB" =~ ^[0-9]+$ ]] || ! [[ "$TOTAL_CPUS" =~ ^[0-9]+$ ]] || ! [[ "$TOTAL_GPUS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: parse failure from node line" >&2
+  echo "$NODE_LINE" >&2
+  exit 5
+fi
+if [[ "$TOTAL_CPUS" -le 0 ]]; then
+  echo "ERROR: CPUTot must be > 0" >&2
+  exit 6
+fi
+if [[ "$TOTAL_GPUS" -le 0 ]]; then
+  echo "ERROR: GPU count parsed as 0 (Gres=$GRES_VAL). Override not implemented in this script." >&2
+  exit 7
+fi
+
+CALC="$(python3 - "$TOTAL_MEM_MB" "$TOTAL_CPUS" "$TOTAL_GPUS" "$GPU_MARGIN" "$CPU_MARGIN" <<'PY'
+import math, sys
+mem=int(sys.argv[1]); cpus=int(sys.argv[2]); gpus=int(sys.argv[3]); gm=float(sys.argv[4]); cm=float(sys.argv[5])
+print(math.floor(mem*(1.0-gm)/gpus))
+print(math.floor(mem*(1.0-cm)/cpus))
+PY
+)"
+MEM_PER_GPU_MB="$(sed -n '1p' <<<"$CALC")"
+MEM_PER_CPU_MB="$(sed -n '2p' <<<"$CALC")"
+
+TS="$(date +%Y%m%d_%H%M%S)"
+GENERATED_LUA="$GEN_DIR/job_submit_${TS}.lua"
+cp "$TEMPLATE" "$GENERATED_LUA"
+sed -i \
+  -e "s/@TOTAL_MEM_MB@/$TOTAL_MEM_MB/g" \
+  -e "s/@TOTAL_CPUS@/$TOTAL_CPUS/g" \
+  -e "s/@TOTAL_GPUS@/$TOTAL_GPUS/g" \
+  -e "s/@GPU_MARGIN@/$GPU_MARGIN/g" \
+  -e "s/@CPU_MARGIN@/$CPU_MARGIN/g" \
+  "$GENERATED_LUA"
+ln -sfn "$(basename "$GENERATED_LUA")" "$GEN_DIR/job_submit.latest.lua"
+
+echo "generated: $GENERATED_LUA"
+echo "node_line: $NODE_LINE"
+echo "computed mem_per_gpu_mb=$MEM_PER_GPU_MB mem_per_cpu_mb=$MEM_PER_CPU_MB"
+
+if [[ "$APPLY_CHANGES" != "1" ]]; then
+  echo "APPLY_CHANGES=$APPLY_CHANGES, skip /etc apply"
+  exit 0
+fi
+
+BKP_TS="$TS"
+sudo cp -a "$SLURM_CONF_PATH" "$BKP_DIR/slurm.conf.bak.$BKP_TS"
+sudo cp -a "$JOB_SUBMIT_PATH" "$BKP_DIR/job_submit.lua.bak.$BKP_TS" 2>/dev/null || true
+
+sudo install -m 0644 "$GENERATED_LUA" "$JOB_SUBMIT_PATH"
+if grep -q '^JobSubmitPlugins=' "$SLURM_CONF_PATH"; then
+  sudo sed -i 's/^JobSubmitPlugins=.*/JobSubmitPlugins=lua/' "$SLURM_CONF_PATH"
+else
+  echo 'JobSubmitPlugins=lua' | sudo tee -a "$SLURM_CONF_PATH" >/dev/null
+fi
+
+sudo scontrol reconfigure
+
+echo "applied: $JOB_SUBMIT_PATH"
+echo "backups: $BKP_DIR/slurm.conf.bak.$BKP_TS and job_submit.lua.bak.$BKP_TS (if existed)"

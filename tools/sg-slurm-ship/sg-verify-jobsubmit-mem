@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT_DIR="$HERE/out/tests"
+mkdir -p "$OUT_DIR"
+
+PARTITION="${PARTITION:-gpu}"
+GPU_COUNT="${GPU_COUNT:-1}"
+CPU_PER_TASK="${CPU_PER_TASK:-4}"
+SLEEP_SEC="${SLEEP_SEC:-60}"
+TOTAL_MEM_MB="${TOTAL_MEM_MB:-515649}"
+TOTAL_CPUS="${TOTAL_CPUS:-64}"
+TOTAL_GPUS="${TOTAL_GPUS:-4}"
+GPU_MARGIN="${GPU_MARGIN:-0.10}"
+CPU_MARGIN="${CPU_MARGIN:-0.15}"
+
+for c in sbatch scontrol python3 rg; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "ERROR: command not found: $c" >&2
+    exit 2
+  fi
+done
+
+CALC="$(python3 - "$TOTAL_MEM_MB" "$TOTAL_CPUS" "$TOTAL_GPUS" "$GPU_MARGIN" "$CPU_MARGIN" "$GPU_COUNT" "$CPU_PER_TASK" <<'PY'
+import math, sys
+mem=int(sys.argv[1]); cpus=int(sys.argv[2]); gpus=int(sys.argv[3]); gm=float(sys.argv[4]); cm=float(sys.argv[5]); req_gpus=int(sys.argv[6]); req_cpus=int(sys.argv[7])
+mpg=math.floor(mem*(1.0-gm)/gpus)
+mpc=math.floor(mem*(1.0-cm)/cpus)
+print(req_gpus*mpg)
+print(req_cpus*mpc)
+PY
+)"
+EXPECT_GPU_MEM="$(sed -n '1p' <<<"$CALC")"
+EXPECT_CPU_MEM="$(sed -n '2p' <<<"$CALC")"
+
+GPU_SH="$OUT_DIR/slurm_gpu_memcheck.sh"
+CPU_SH="$OUT_DIR/slurm_cpu_memcheck.sh"
+cat > "$GPU_SH" <<EOS
+#!/usr/bin/env bash
+set -euo pipefail
+sleep $SLEEP_SEC
+EOS
+cat > "$CPU_SH" <<EOS
+#!/usr/bin/env bash
+set -euo pipefail
+sleep $SLEEP_SEC
+EOS
+chmod +x "$GPU_SH" "$CPU_SH"
+
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="$OUT_DIR/verify_${TS}.log"
+{
+  echo "timestamp=$TS"
+  echo "partition=$PARTITION"
+  echo "expect_gpu_mem_mb=$EXPECT_GPU_MEM"
+  echo "expect_cpu_mem_mb=$EXPECT_CPU_MEM"
+
+  echo "== gpu memcheck submit =="
+  set +e
+  gpu_submit="$(sbatch --parsable --partition="$PARTITION" --gpus="$GPU_COUNT" "$GPU_SH" 2>&1)"
+  gpu_rc=$?
+  set -e
+  echo "gpu_rc=$gpu_rc"
+  echo "gpu_submit=$gpu_submit"
+  if [[ "$gpu_rc" -eq 0 ]]; then
+    gpu_jid="${gpu_submit%%_*}"
+    echo "gpu_jid=$gpu_jid"
+    gpu_show="$(scontrol show job "$gpu_jid")"
+    echo "$gpu_show" | tr ' ' '\n' | rg -n '^ReqTRES=|^MinMemory|^NumCPUs=|^Gres=|^TresPerTask=|^TresPerNode='
+  fi
+
+  echo "== cpu memcheck submit =="
+  set +e
+  cpu_submit="$(sbatch --parsable --partition="$PARTITION" --cpus-per-task="$CPU_PER_TASK" "$CPU_SH" 2>&1)"
+  cpu_rc=$?
+  set -e
+  echo "cpu_rc=$cpu_rc"
+  echo "cpu_submit=$cpu_submit"
+  if [[ "$cpu_rc" -eq 0 ]]; then
+    cpu_jid="${cpu_submit%%_*}"
+    echo "cpu_jid=$cpu_jid"
+    cpu_show="$(scontrol show job "$cpu_jid")"
+    echo "$cpu_show" | tr ' ' '\n' | rg -n '^ReqTRES=|^MinMemory|^NumCPUs=|^Gres=|^TresPerTask=|^TresPerNode='
+  fi
+
+  echo "== result =="
+  if [[ "$gpu_rc" -eq 0 ]]; then
+    gpu_mem_line="$(scontrol show job "${gpu_submit%%_*}" | tr ' ' '\n' | rg '^ReqTRES=' | head -n 1 || true)"
+    echo "gpu_reqtres=$gpu_mem_line"
+    if rg -q "mem=${EXPECT_GPU_MEM}M" <<<"$gpu_mem_line"; then
+      echo "gpu_check=PASS"
+    else
+      echo "gpu_check=FAIL"
+    fi
+  fi
+  if [[ "$cpu_rc" -eq 0 ]]; then
+    cpu_mem_line="$(scontrol show job "${cpu_submit%%_*}" | tr ' ' '\n' | rg '^ReqTRES=' | head -n 1 || true)"
+    echo "cpu_reqtres=$cpu_mem_line"
+    if rg -q "mem=${EXPECT_CPU_MEM}M" <<<"$cpu_mem_line"; then
+      echo "cpu_check=PASS"
+    else
+      echo "cpu_check=FAIL"
+    fi
+  fi
+} | tee "$LOG"
+
+echo "saved: $LOG"

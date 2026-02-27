@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT_DIR="$HERE/out"
+mkdir -p "$OUT_DIR"
+
+GPU_MARGIN="${GPU_MARGIN:-0.10}"
+CPU_MARGIN="${CPU_MARGIN:-0.15}"
+NODE_NAME="${NODE_NAME:-}"
+
+for c in scontrol awk sed; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "ERROR: command not found: $c" >&2
+    exit 2
+  fi
+done
+
+NODE_LINE=""
+if [[ -n "$NODE_NAME" ]]; then
+  NODE_LINE="$(scontrol show node "$NODE_NAME" -o | head -n 1)"
+else
+  NODE_LINE="$(scontrol show node -o | head -n 1)"
+fi
+if [[ -z "$NODE_LINE" ]]; then
+  echo "ERROR: failed to get node info from slurm" >&2
+  exit 3
+fi
+
+parse_key() {
+  local key="$1"
+  awk -v k="$key" '{for(i=1;i<=NF;i++){if($i ~ ("^"k"=")){sub("^"k"=", "", $i); print $i; exit}}}' <<<"$NODE_LINE"
+}
+
+parse_gpu_count_from_gres() {
+  local gres="$1"
+  python3 - "$gres" <<'PY'
+import re, sys
+gres = (sys.argv[1] or "").lower()
+count = 0
+for tok in gres.split(","):
+    if "gpu" not in tok:
+        continue
+    m = re.search(r"[:=]([0-9]+)\s*$", tok)
+    if m:
+        count += int(m.group(1))
+    else:
+        count += 1
+print(count)
+PY
+}
+
+REAL_MEM_MB="$(parse_key RealMemory)"
+CPU_TOT="$(parse_key CPUTot)"
+GRES_VAL="$(parse_key Gres)"
+NODE_RESOLVED="$(parse_key NodeName)"
+
+GPU_COUNT="$(parse_gpu_count_from_gres "$GRES_VAL")"
+
+if ! [[ "$REAL_MEM_MB" =~ ^[0-9]+$ ]] || ! [[ "$CPU_TOT" =~ ^[0-9]+$ ]] || ! [[ "$GPU_COUNT" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: parse failure from node line" >&2
+  echo "$NODE_LINE" >&2
+  exit 4
+fi
+if [[ "$CPU_TOT" -le 0 ]]; then
+  echo "ERROR: CPUTot must be > 0" >&2
+  exit 5
+fi
+if [[ "$GPU_COUNT" -le 0 ]]; then
+  echo "WARN: GPU count parsed as 0 (Gres=$GRES_VAL)" >&2
+fi
+
+python3 - "$REAL_MEM_MB" "$CPU_TOT" "$GPU_COUNT" "$GPU_MARGIN" "$CPU_MARGIN" <<'PY'
+import math, sys
+mem=int(sys.argv[1]); cpus=int(sys.argv[2]); gpus=int(sys.argv[3]); gm=float(sys.argv[4]); cm=float(sys.argv[5])
+mpc=math.floor(mem*(1.0-cm)/cpus)
+if gpus>0:
+    mpg=math.floor(mem*(1.0-gm)/gpus)
+else:
+    mpg=0
+print(f"real_mem_mb={mem}")
+print(f"cpu_tot={cpus}")
+print(f"gpu_count={gpus}")
+print(f"gpu_margin={gm:.4f}")
+print(f"cpu_margin={cm:.4f}")
+print(f"mem_per_gpu_mb={mpg}")
+print(f"mem_per_cpu_mb={mpc}")
+PY
+
+TS="$(date +%Y%m%d_%H%M%S)"
+REPORT="$OUT_DIR/precheck_${TS}.txt"
+{
+  echo "timestamp=$TS"
+  echo "node_name=$NODE_RESOLVED"
+  echo "node_line=$NODE_LINE"
+  echo "real_mem_mb=$REAL_MEM_MB"
+  echo "cpu_tot=$CPU_TOT"
+  echo "gpu_count=$GPU_COUNT"
+  echo "gpu_margin=$GPU_MARGIN"
+  echo "cpu_margin=$CPU_MARGIN"
+  python3 - "$REAL_MEM_MB" "$CPU_TOT" "$GPU_COUNT" "$GPU_MARGIN" "$CPU_MARGIN" <<'PY'
+import math, sys
+mem=int(sys.argv[1]); cpus=int(sys.argv[2]); gpus=int(sys.argv[3]); gm=float(sys.argv[4]); cm=float(sys.argv[5])
+print(f"mem_per_gpu_mb={math.floor(mem*(1.0-gm)/max(gpus,1)) if gpus > 0 else 0}")
+print(f"mem_per_cpu_mb={math.floor(mem*(1.0-cm)/cpus)}")
+PY
+} > "$REPORT"
+
+echo "saved: $REPORT"
