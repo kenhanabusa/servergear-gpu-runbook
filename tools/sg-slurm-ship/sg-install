@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+"$HERE/sg-precheck-slurm-ship"
+APPLY_GRES_CONF="${APPLY_GRES_CONF:-1}" \
+GPU_MARGIN="${GPU_MARGIN:-0.10}" \
+CPU_MARGIN="${CPU_MARGIN:-0.15}" \
+"$HERE/sg-apply-jobsubmit-mem"

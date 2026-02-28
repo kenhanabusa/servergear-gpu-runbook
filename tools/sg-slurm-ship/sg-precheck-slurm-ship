@@ -42,7 +42,11 @@ count = 0
 for tok in gres.split(","):
     if "gpu" not in tok:
         continue
-    m = re.search(r"[:=]([0-9]+)\s*$", tok)
+    # Trim optional suffix like "(S:0-1)" first.
+    base = tok.split("(", 1)[0].strip()
+    m = re.search(r"gpu(?::[^:,()]+)?:(\d+)$", base)
+    if m is None:
+        m = re.search(r"gpu=(\d+)$", base)
     if m:
         count += int(m.group(1))
     else:

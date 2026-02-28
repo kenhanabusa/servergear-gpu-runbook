@@ -94,3 +94,11 @@ cpu_jid=6397
 ReqTRES=cpu=4,mem=27392M,node=1,billing=4
 MinMemoryCPU=6848M
 ```
+
+## v2 Release (2026-02-28)
+- v2 ZIP: `dist/releases/20260228/sg-slurm-ship_runbook_v2_20260228.zip`
+- sha256: `672260c14bbae01995e43ce18b8b403abdfb26ac0226afeea27e8381a4f55f51`
+- ZIP除外ルール:
+  - `tools/sg-slurm-ship/out/*`
+  - `**/*.bak.*`
+- 状態: 出荷機で E2E PASS 済み（install -> verify -> uninstall/rollback まで確認）
